@@ -287,9 +287,52 @@ Derived (batch endpoints accept up to 5,000 items and are idempotent on natural 
 - `GET /clusters/:id`, `GET /clusters/:id/members`, `GET /clusters/:id/provenance`
 - `POST /clusters/:id/labels`, `GET /clusters/:id/labels`, `POST /labels/:id/reviews`
 
+Derived API details (added in Phase 3, where the spec above left them open):
+- Creating segmentations, chunks, embedding spaces and embeddings needs `contributor`. Also
+  `GET /texts/:id/segmentations` (paginated, hides withdrawn unless `?include_withdrawn=true`).
+  There are no withdraw endpoints for segmentations/spaces yet (the columns exist).
+- Batch endpoints (`POST /segmentations/:id/chunks`, `POST /embedding-spaces/:id/embeddings`) take a
+  JSON array of 1…`MAX_BATCH_ITEMS` items (more → 400) and are all-or-nothing:
+  - Any invalid item → 422 with `details: { failed, errors: [{ index, reason, message, sequence | chunk_id }] }`
+    (all failing items, up to 1,000). Duplicate keys within one batch (`sequence`/`chunk_id`, client `id`)
+    are 422 too. Nothing is inserted.
+  - Idempotent on the natural key (`(segmentation, sequence)`, `(chunk, space)`): an existing row with
+    identical content (offsets/text/locus/language/metadata, or vector/metadata; plus the `id` if the
+    client sent one) is `skipped`; different content → 409 with `details.conflicts: [{ index, sequence | chunk_id, existing_id }]`,
+    nothing inserted. Response `200 { inserted, skipped }`.
+  - One `batch_insert` audit event per request that inserted rows (`entity_id` = segmentation or space,
+    `batch_count` = inserted, `changes = { parent_type, skipped }`); a pure retry writes none.
+- Chunk offsets are validated **in PostgreSQL** (`substr`/`char_length`, i.e. code points):
+  `end_offset ≤ char_length`, `char_length(text) = end - start`, and `text = substr(body, start+1, end-start)`.
+  Chunks and segmentations cannot be added to withdrawn texts/segmentations (409).
+- Embeddings: `vector` must have the space's dimension, finite values (|x| ≤ 65504 for spaces searched as
+  `halfvec`), non-zero for cosine, and unit length (±1%) for `normalized` spaces. The chunk must exist and
+  not belong to a withdrawn segmentation, text or work (422); the space must not be withdrawn (409).
+- Reads: `GET /segmentations/:id` includes `chunk_count`. `GET /segmentations/:id/chunks` is paginated by
+  `sequence`. `GET /chunks/:id` includes `effective_access_level`; `?include_embeddings=true` lists its
+  embeddings (space summaries), and `&include_vectors=true` adds the vectors. Vectors are returned nowhere else.
+  Chunk text (and vectors) of restricted texts need `contributor`; readers get 403 (segmentation metadata stays readable).
+- `GET /embedding-spaces/:id` includes `hnsw_index`: `absent | valid | invalid`.
+- `POST /search`: `{ embedding_space_id, vector, limit? (1–200, default 10), filters? }` →
+  `{ embedding_space_id, metric, items: [{ embedding_id, distance, similarity, chunk, text, work, authors }] }`,
+  ordered by `distance` ascending. `distance` is the metric operator's value: cosine distance (`<=>`),
+  **negative** inner product (`<#>`) or L2 distance (`<->`); `similarity` is `1 - distance` (cosine),
+  `-distance` = the inner product (inner_product), or `null` (l2).
+  - Filters: `language` (chunk override, else text language), `work_id`, `person_id` (via `work_person`, any role),
+    `relation`, `genre`, `year_from`/`year_to` (overlap; undated excluded) on the **text** date by default or the
+    work date with `date_basis: "work"`, and `include_restricted` (403 unless `contributor`+).
+  - Withdrawn segmentations/texts/works are excluded; a withdrawn space is a 409. Restricted chunks are
+    excluded unless `include_restricted: true`.
+  - The query runs in a transaction with `hnsw.iterative_scan = relaxed_order` (and `hnsw.ef_search =
+    max(40, limit)`) and is re-sorted afterwards. With very selective filters an index scan may stop at
+    pgvector's `hnsw.max_scan_tuples` (default 20,000) and return fewer than `limit` hits.
+  - Vectors are compared as `vector(N)` for N ≤ 2000, `halfvec(N)` for 2000 < N ≤ 4000 (with or without an
+    index, so results do not change when one is built) and `vector(N)` above 4000 (exact scan; not indexable).
+
 Admin:
 - `POST /admin/users`, `POST /admin/users/:id/tokens`, `DELETE /admin/tokens/:id`
-- CLI: `npm run cli -- create-user`, `create-token`, `revoke-token`, `migrate`, `create-index <embedding_space_id>`
+- CLI: `npm run cli -- create-user`, `create-token`, `revoke-token`, `migrate`, `create-index <embedding_space_id>`,
+  `drop-index <embedding_space_id>`
 
 Other:
 - `GET /health` (the only unauthenticated route), `GET /me` (the caller's own user id, role and kind;
@@ -303,7 +346,12 @@ query embedding. The caller is responsible for producing it in the same space (i
 `query_prefix`). Similarity across different spaces is not supported.
 
 Vector indexes are per embedding space (partial HNSW expression indexes, `halfvec` above
-2,000 dimensions), created by an operator via the CLI, not through the public API.
+2,000 dimensions), created by an operator via the CLI, not through the public API:
+`npm run cli -- create-index <space_id>` runs
+`CREATE INDEX CONCURRENTLY IF NOT EXISTS embedding_hnsw_<id hex> ON embedding USING hnsw ((vector::vector(N)) vector_<cosine|ip|l2>_ops) WHERE embedding_space_id = '<id>'`
+(`halfvec`/`halfvec_*_ops` for 2000 < N ≤ 4000; spaces above 4,000 dimensions are refused). An invalid
+index left by an interrupted build is dropped and rebuilt. `drop-index <space_id>` removes it. Both need
+a role that owns the `embedding` table (e.g. `OWNER_DATABASE_URL`), not `sermonize_app`.
 
 ## Development
 
@@ -335,11 +383,13 @@ Scripts:
 | `npm run typecheck` | `tsc --noEmit` over `src/` and `test/` |
 | `npm test` | vitest against `TEST_DATABASE_URL` (default `postgres://sermonize:sermonize@localhost:5432/sermonize_test`). **Drops and recreates the `public` and `private` schemas** of that database once per run, then applies all migrations. Test files run one at a time. |
 | `npm run migrate` | apply pending migrations to `DATABASE_URL` |
-| `npm run cli -- <command>` | `migrate`, `create-user`, `create-token`, `revoke-token` (see `npm run cli -- help`) |
+| `npm run cli -- <command>` | `migrate`, `create-user`, `create-token`, `revoke-token`, `create-index`, `drop-index` (see `npm run cli -- help`) |
 
 Layout: `src/db` (pool, migration runner, `withTransaction`), `src/plugins` (db, auth, error
-handling), `src/routes` (`scholarly/` for persons, works, sources, texts), `src/lib` (principal/roles,
-errors, tokens, users, batch audit, `pagination.ts` keyset cursors, `sql.ts` whitelisted INSERT/UPDATE builders),
+handling), `src/routes` (`scholarly/` for persons, works, sources, texts; `derived/` for segmentations, chunks,
+embedding spaces, embeddings, search), `src/lib` (principal/roles, errors, tokens, users, batch audit,
+`pagination.ts` keyset cursors, `sql.ts` whitelisted INSERT/UPDATE builders, `vector.ts` casts/operators/literals,
+`vector-index.ts` HNSW index management),
 `migrations/` (SQL), `sql/roles.sql` (ops), `test/` (`helpers.ts` is the shared test toolkit).
 
 ### Database roles (`sql/roles.sql`)

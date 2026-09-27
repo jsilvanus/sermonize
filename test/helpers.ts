@@ -33,9 +33,9 @@ export function createTestPool(): Pool {
 }
 
 /** Builds the app against the test database. Call `close()` in afterAll. */
-export async function setupTestApp(): Promise<TestContext> {
+export async function setupTestApp(opts: { maxBatchItems?: number } = {}): Promise<TestContext> {
   const pool = createTestPool();
-  const app = await buildApp({ pool });
+  const app = await buildApp({ pool, ...opts });
   return {
     app,
     pool,

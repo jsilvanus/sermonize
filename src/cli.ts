@@ -6,6 +6,7 @@ import { createPool } from './db/pool.js';
 import { withTransaction } from './db/transaction.js';
 import { ROLES, SYSTEM_PRINCIPAL, USER_KINDS, type Role, type UserKind } from './lib/principal.js';
 import { createUser, getUser, issueToken, revokeToken } from './lib/users.js';
+import { createVectorIndex, dropVectorIndex } from './lib/vector-index.js';
 
 const USAGE = `Usage: npm run cli -- <command> [options]
 
@@ -16,6 +17,9 @@ Commands:
   create-token --user <id> --name <name>            issue an API token, prints it once
               [--expires-at <ISO timestamp>]
   revoke-token <token-id>                           revoke an API token
+  create-index <embedding-space-id>                 build the space's partial HNSW index
+                                                    (CREATE INDEX CONCURRENTLY; ≤ 4000 dimensions)
+  drop-index <embedding-space-id>                   drop the space's HNSW index (CONCURRENTLY)
 
 Roles: ${ROLES.join(', ')}. All writes run as the system user ${SYSTEM_PRINCIPAL.userId}.`;
 
@@ -84,6 +88,20 @@ async function main(argv: string[]): Promise<void> {
         const found = await asSystem((c) => revokeToken(c, id));
         if (!found) fail(`token ${id} not found`);
         console.log(`revoked ${id}`);
+        break;
+      }
+      case 'create-index': {
+        const id = positionals[0];
+        if (!id) fail('embedding space id is required');
+        const { name, created } = await createVectorIndex(pool, id);
+        console.log(created ? `created ${name}` : `${name} already exists`);
+        break;
+      }
+      case 'drop-index': {
+        const id = positionals[0];
+        if (!id) fail('embedding space id is required');
+        const { name, dropped } = await dropVectorIndex(pool, id);
+        console.log(dropped ? `dropped ${name}` : `${name} does not exist`);
         break;
       }
       default:
