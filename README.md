@@ -461,7 +461,7 @@ Scripts of `packages/api` (run them there, with `-w @sermonize/api` from the roo
 | `npm run dev` | API with reload (tsx watch) |
 | `npm run build` / `npm start` | compile to `dist/` / run the compiled server |
 | `npm run typecheck` | `tsc --noEmit` over `src/` and `test/` |
-| `npm test` | vitest (in `packages/api`) against `TEST_DATABASE_URL` (default `postgres://sermonize:sermonize@localhost:5432/sermonize_test`). **Drops and recreates the `public` and `private` schemas** of that database once per run, then applies all migrations. Test files run one at a time. |
+| `npm test` | vitest (in `packages/api`) against `TEST_DATABASE_URL` (default `postgres://sermonize:sermonize@localhost:5432/sermonize_test`). **Drops and recreates the `public` and `private` schemas** of that database once per run, then applies all migrations. Test files run one at a time. The MCP package's integration test uses the same database without resetting it; the root `npm test` runs the two suites one after another. |
 | `npm run migrate` | apply pending migrations to `DATABASE_URL` |
 | `npm run cli -- <command>` | `migrate`, `create-user`, `create-token`, `revoke-token`, `create-index`, `drop-index` (see `npm run cli -- help`) |
 

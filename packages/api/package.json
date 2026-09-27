@@ -9,7 +9,7 @@
   },
   "exports": {
     "./*": {
-      "source": "./src/*.ts",
+      "@sermonize/source": "./src/*.ts",
       "default": "./dist/*.js"
     }
   },
