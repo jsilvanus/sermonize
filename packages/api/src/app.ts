@@ -3,7 +3,7 @@ import Fastify, { type FastifyServerOptions } from 'fastify';
 import { TypeBoxValidatorCompiler, type TypeBoxTypeProvider } from '@fastify/type-provider-typebox';
 import rateLimit from '@fastify/rate-limit';
 import type { Pool } from 'pg';
-import { parseRegistrationRole, type AuthConfig } from './config.js';
+import { parsePublicBasePath, parseRegistrationRole, type AuthConfig } from './config.js';
 import { ApiError } from './lib/errors.js';
 import { authPlugin } from './plugins/auth.js';
 import { dbPlugin } from './plugins/db.js';
@@ -30,6 +30,11 @@ export interface BuildAppOptions {
   auth?: Partial<AuthConfig>;
   /** Fastify `trustProxy` (TRUST_PROXY); decides `request.ip` for the auth rate limit. */
   trustProxy?: boolean | string;
+  /**
+   * Public path prefix added by a reverse proxy (PUBLIC_BASE_PATH, e.g. '/api'); default '' (served at the root).
+   * Sets the OpenAPI `servers` entry and the Swagger UI asset URLs; the routes themselves stay at the root.
+   */
+  publicBasePath?: string;
 }
 
 const DEFAULT_AUTH: AuthConfig = {
@@ -41,8 +46,16 @@ const DEFAULT_AUTH: AuthConfig = {
   rateLimit: null,
 };
 
-export async function buildApp({ pool, logger = false, maxBatchItems = 5000, auth, trustProxy = false }: BuildAppOptions) {
+export async function buildApp({
+  pool,
+  logger = false,
+  maxBatchItems = 5000,
+  auth,
+  trustProxy = false,
+  publicBasePath = '',
+}: BuildAppOptions) {
   const authConfig: AuthConfig = { ...DEFAULT_AUTH, ...auth };
+  const basePath = parsePublicBasePath(publicBasePath); // normalises and validates
   // Fail at startup, not at the first registration.
   parseRegistrationRole(authConfig.registrationDefaultRole);
   for (const key of ['loginTokenTtlHours', 'mcpLoginTokenTtlHours', 'cliLoginTokenTtlHours'] as const) {
@@ -65,7 +78,7 @@ export async function buildApp({ pool, logger = false, maxBatchItems = 5000, aut
 
   await app.register(dbPlugin, { pool });
   await app.register(authPlugin);
-  await app.register(openApiPlugin); // before the routes it documents
+  await app.register(openApiPlugin, { publicBasePath: basePath }); // before the routes it documents
   if (authConfig.rateLimit) {
     // Only routes with `config.rateLimit` (register/login) are limited; in-memory, per IP.
     await app.register(rateLimit, {

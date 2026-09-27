@@ -34,7 +34,7 @@ export function createTestPool(): Pool {
 
 /** Builds the app against the test database. Call `close()` in afterAll. */
 export async function setupTestApp(
-  opts: Pick<BuildAppOptions, 'maxBatchItems' | 'auth' | 'trustProxy'> = {},
+  opts: Pick<BuildAppOptions, 'maxBatchItems' | 'auth' | 'trustProxy' | 'publicBasePath'> = {},
 ): Promise<TestContext> {
   const pool = createTestPool();
   const app = await buildApp({ pool, ...opts });

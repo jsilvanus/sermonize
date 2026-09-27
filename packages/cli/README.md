@@ -24,7 +24,7 @@ Requirements: Node.js ≥ 22.12 and a reachable Sermonize API.
 
 | variable | default | meaning |
 |---|---|---|
-| `SERMONIZE_API_URL` | the URL saved by `login`, else `http://127.0.0.1:3000` | API base URL |
+| `SERMONIZE_API_URL` | the URL saved by `login`, else `http://127.0.0.1:3000` | API base URL; may include a path prefix, e.g. `https://example.org/api` behind the nginx of [`docs/deployment.md`](../../docs/deployment.md) |
 | `SERMONIZE_TOKEN` | – | API token to use; takes precedence over the saved one |
 | `XDG_CONFIG_HOME` | `~/.config` | the token from `login` is saved in `$XDG_CONFIG_HOME/sermonize/credentials.json` (directory 0700, file 0600) |
 
@@ -43,7 +43,7 @@ read -rs PW && printf '%s\n' "$PW" | npm run --silent cli -- create-user --kind 
 Then, against the running API:
 
 ```sh
-export SERMONIZE_API_URL=https://api.example.org
+export SERMONIZE_API_URL=https://example.org/api   # the API behind nginx's /api/ (docs/deployment.md)
 sermonize-admin login --email you@example.org   # Password: (hidden)
 sermonize-admin whoami
 ```

@@ -326,7 +326,7 @@ describe('admin user management', () => {
     expect((await put({ password: PASSWORD }, noEmail.id)).statusCode).toBe(422);
 
     const audit = await ctx.pool.query(
-      `SELECT action, changes FROM audit_event WHERE (entity_id = $1 AND action = 'password_set') OR (action = 'token_revoke' AND changes->>'user_id' = $1::text) ORDER BY occurred_at, id`,
+      `SELECT action, changes FROM audit_event WHERE (entity_id = $1 AND action = 'password_set') OR (action = 'token_revoke' AND changes->>'user_id' = $1::text) ORDER BY occurred_at, action, id`,
       [user.id],
     );
     expect(audit.rows.map((r) => r.action)).toEqual(['password_set', 'password_set', 'token_revoke', 'token_revoke']);

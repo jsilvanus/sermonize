@@ -11,6 +11,16 @@ function tagOf(url: string): string {
   return first === 'admin' ? 'admin' : first;
 }
 
+export interface OpenApiOptions {
+  /**
+   * Path prefix under which a reverse proxy publishes the API (e.g. '/api'), normalised by
+   * `parsePublicBasePath`; '' when the API is served at the root. It becomes the document's
+   * `servers` entry (so "Try it out" and generated clients call `/api/...`) and the prefix of the
+   * Swagger UI asset URLs on `/docs` (the page is then reached as `<prefix>/docs`).
+   */
+  publicBasePath?: string;
+}
+
 /**
  * OpenAPI 3 document generated from the route schemas (@fastify/swagger) and
  * Swagger UI at /docs (JSON at /docs/json). The documentation routes are public;
@@ -18,7 +28,8 @@ function tagOf(url: string): string {
  * Must be registered before the routes it documents.
  */
 export const openApiPlugin = fp(
-  async (app: FastifyInstance) => {
+  async (app: FastifyInstance, opts: OpenApiOptions) => {
+    const basePath = opts.publicBasePath ?? '';
     // The docs routes are registered by swagger-ui; mark them public for the auth hook.
     app.addHook('onRoute', (route) => {
       if (route.url === DOCS_PREFIX || route.url.startsWith(`${DOCS_PREFIX}/`)) {
@@ -44,6 +55,7 @@ export const openApiPlugin = fp(
           },
         },
         security: [{ bearerAuth: [] }],
+        ...(basePath ? { servers: [{ url: basePath, description: 'this deployment (behind a reverse proxy)' }] } : {}),
       },
       transform: ({ schema, url, route }) => {
         const isPublic = (route.config as { public?: boolean } | undefined)?.public === true;
@@ -56,7 +68,9 @@ export const openApiPlugin = fp(
       },
     });
 
-    await app.register(swaggerUi, { routePrefix: DOCS_PREFIX });
+    // `indexPrefix` only changes the absolute asset URLs of `GET /docs` (no trailing slash) to
+    // `<basePath>/docs/static/...`; `/docs/` uses relative URLs and `./json` is resolved in the browser.
+    await app.register(swaggerUi, { routePrefix: DOCS_PREFIX, ...(basePath ? { indexPrefix: basePath } : {}) });
   },
   { name: 'openapi' },
 );

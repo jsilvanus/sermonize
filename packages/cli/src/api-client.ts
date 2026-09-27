@@ -101,7 +101,9 @@ export class ApiClient {
     }
     let res: Response;
     try {
-      res = await this.fetchImpl(new URL(path, `${this.baseUrl}/`), {
+      // `path` is relative to the base URL, which may itself have a path (https://example.org/api behind
+      // a reverse proxy): resolve it without its leading slash so the base path is kept.
+      res = await this.fetchImpl(new URL(path.replace(/^\/+/, ''), `${this.baseUrl}/`), {
         method,
         headers,
         ...(body !== undefined && { body: JSON.stringify(body) }),

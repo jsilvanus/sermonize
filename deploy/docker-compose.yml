@@ -1,0 +1,249 @@
+# Sermonize production stack on one domain behind nginx. See docs/deployment.md.
+#
+#   cd deploy
+#   sh scripts/init-env.sh sermonize.example.org admin@example.org   # creates .env with fresh secrets
+#   docker compose build
+#   sh scripts/self-signed.sh                                        # placeholder cert so nginx can start
+#   docker compose up -d
+#   sh scripts/init-letsencrypt.sh                                   # real certificate (webroot)
+#   sh scripts/bootstrap-admin.sh you@example.org                    # first admin
+#
+# Only nginx publishes ports. db, api and web sit on an internal network without Internet access;
+# mcp also has an egress network (it fetches OAuth client metadata documents over HTTPS).
+
+name: sermonize
+
+x-node-service: &node-service
+  restart: unless-stopped
+  init: true
+  read_only: true
+  tmpfs:
+    - /tmp
+  security_opt:
+    - no-new-privileges:true
+  cap_drop:
+    - ALL
+  logging:
+    driver: json-file
+    options:
+      max-size: 10m
+      max-file: "5"
+
+x-build: &build
+  context: ..
+  dockerfile: Dockerfile
+
+services:
+  db:
+    image: pgvector/pgvector:0.8.1-pg16
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: sermonize
+      POSTGRES_DB: sermonize
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in deploy/.env}
+      POSTGRES_INITDB_ARGS: --auth-host=scram-sha-256
+    volumes:
+      - db_data:/var/lib/postgresql/data
+    shm_size: 256mb # HNSW index builds (create-index) use parallel workers
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U sermonize -d sermonize"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 10s
+    networks:
+      - backend
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "5"
+
+  # One-off: migrations as the schema owner, then sql/roles.sql (creates/refreshes sermonize_app and its
+  # grants) and the sermonize_app password from SERMONIZE_APP_DB_PASSWORD. Runs on every `up`; idempotent.
+  migrate:
+    build:
+      <<: *build
+      target: tools
+    image: sermonize-tools:${SERMONIZE_TAG:-latest}
+    command: ["sermonize-migrate"]
+    restart: "no"
+    environment:
+      OWNER_DATABASE_URL: postgres://sermonize:${POSTGRES_PASSWORD}@db:5432/sermonize
+      SERMONIZE_APP_DB_PASSWORD: ${SERMONIZE_APP_DB_PASSWORD:?set SERMONIZE_APP_DB_PASSWORD in deploy/.env}
+    depends_on:
+      db:
+        condition: service_healthy
+    networks:
+      - backend
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+
+  api:
+    <<: *node-service
+    build:
+      <<: *build
+      target: api
+    image: sermonize-api:${SERMONIZE_TAG:-latest}
+    environment:
+      PORT: "3000"
+      HOST: 0.0.0.0
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      # Least-privileged role (sql/roles.sql), not the owner.
+      DATABASE_URL: postgres://sermonize_app:${SERMONIZE_APP_DB_PASSWORD}@db:5432/sermonize
+      # nginx forwards /api/* here with the prefix stripped; OpenAPI servers + Swagger UI assets use it.
+      PUBLIC_BASE_PATH: /api
+      # Callers that forward the end user's IP: nginx, web and mcp, all on the backend network.
+      TRUST_PROXY: ${SERMONIZE_SUBNET:-172.28.0.0/24}
+      MAX_BATCH_ITEMS: ${MAX_BATCH_ITEMS:-5000}
+      REGISTRATION_OPEN: ${REGISTRATION_OPEN:-false}
+      REGISTRATION_DEFAULT_ROLE: ${REGISTRATION_DEFAULT_ROLE:-reader}
+      LOGIN_TOKEN_TTL_HOURS: ${LOGIN_TOKEN_TTL_HOURS:-12}
+      MCP_LOGIN_TOKEN_TTL_HOURS: ${MCP_LOGIN_TOKEN_TTL_HOURS:-720}
+      CLI_LOGIN_TOKEN_TTL_HOURS: ${CLI_LOGIN_TOKEN_TTL_HOURS:-12}
+      AUTH_RATE_LIMIT_MAX: ${AUTH_RATE_LIMIT_MAX:-10}
+      AUTH_RATE_LIMIT_WINDOW_SECONDS: ${AUTH_RATE_LIMIT_WINDOW_SECONDS:-60}
+    depends_on:
+      db:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    networks:
+      - backend
+
+  mcp:
+    <<: *node-service
+    build:
+      <<: *build
+      target: mcp
+    image: sermonize-mcp:${SERMONIZE_TAG:-latest}
+    environment:
+      PORT: "5999"
+      HOST: 0.0.0.0
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      MCP_PUBLIC_URL: https://${DOMAIN:?set DOMAIN in deploy/.env}
+      TRUST_PROXY: ${NGINX_BACKEND_IP:-172.28.0.10}
+      JWT_SECRET: ${MCP_JWT_SECRET:?set MCP_JWT_SECRET in deploy/.env}
+      SERMONIZE_TOKEN_KEY: ${MCP_TOKEN_KEY:?set MCP_TOKEN_KEY in deploy/.env}
+      STORAGE_PATH: /data/app.sqlite
+      SERMONIZE_API_URL: http://api:3000
+      SERMONIZE_REQUEST_TIMEOUT_MS: ${MCP_REQUEST_TIMEOUT_MS:-15000}
+    volumes:
+      - mcp_data:/data
+    depends_on:
+      api:
+        condition: service_healthy
+    networks:
+      - backend
+      - egress
+
+  web:
+    <<: *node-service
+    build:
+      <<: *build
+      target: web
+    image: sermonize-web:${SERMONIZE_TAG:-latest}
+    environment:
+      PORT: "3100"
+      HOST: 0.0.0.0
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      SERMONIZE_API_URL: http://api:3000
+      TRUST_PROXY: ${NGINX_BACKEND_IP:-172.28.0.10}
+      WEB_COOKIE_SECRET: ${WEB_COOKIE_SECRET:?set WEB_COOKIE_SECRET in deploy/.env}
+      WEB_COOKIE_SECURE: "true"
+      SERMONIZE_REQUEST_TIMEOUT_MS: ${WEB_REQUEST_TIMEOUT_MS:-10000}
+    depends_on:
+      api:
+        condition: service_healthy
+    networks:
+      - backend
+
+  nginx:
+    image: nginx:1.28-alpine
+    restart: unless-stopped
+    ports:
+      - "${HTTP_PORT:-80}:80"
+      - "${HTTPS_PORT:-443}:443"
+    environment:
+      DOMAIN: ${DOMAIN}
+      NGINX_ENTRYPOINT_LOCAL_RESOLVERS: "1"
+      NGINX_ENVSUBST_FILTER: ^(DOMAIN|NGINX_LOCAL_RESOLVERS)$$
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./nginx/templates:/etc/nginx/templates:ro
+      # Directory mount (not single files), so edits of admin-allow.conf are seen after `nginx -s reload`.
+      - ./nginx:/etc/nginx/sermonize:ro
+      - ./certbot/conf:/etc/letsencrypt:ro
+      - ./certbot/www:/var/www/certbot:ro
+    depends_on:
+      web:
+        condition: service_healthy
+      mcp:
+        condition: service_healthy
+      api:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1/nginx-health || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+    networks:
+      backend:
+        # Fixed address: web and mcp trust exactly this proxy (TRUST_PROXY).
+        ipv4_address: ${NGINX_BACKEND_IP:-172.28.0.10}
+      edge: {}
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "5"
+
+  # Certificates (profile "certbot"): scripts/init-letsencrypt.sh, then renew from cron:
+  #   docker compose --profile certbot run --rm certbot renew && docker compose exec nginx nginx -s reload
+  certbot:
+    image: certbot/certbot:v4.1.1
+    profiles: ["certbot"]
+    volumes:
+      - ./certbot/conf:/etc/letsencrypt
+      - ./certbot/www:/var/www/certbot
+    networks:
+      - egress
+
+  # Operations shell (profile "tools"): the API's database CLI as the schema owner, sermonize-admin
+  # against the API on the internal network, psql. E.g.
+  #   docker compose run --rm tools sermonize-db create-index <embedding-space-id>
+  #   docker compose run --rm tools sermonize-admin login --email you@example.org
+  tools:
+    build:
+      <<: *build
+      target: tools
+    image: sermonize-tools:${SERMONIZE_TAG:-latest}
+    profiles: ["tools"]
+    environment:
+      DATABASE_URL: postgres://sermonize:${POSTGRES_PASSWORD}@db:5432/sermonize
+      SERMONIZE_API_URL: http://api:3000
+    networks:
+      - backend
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+
+networks:
+  # Internal: no route to the Internet, no published ports. Fixed subnet so the API's TRUST_PROXY can
+  # name it and nginx can have a fixed address.
+  backend:
+    internal: true
+    ipam:
+      config:
+        - subnet: ${SERMONIZE_SUBNET:-172.28.0.0/24}
+  # nginx's published ports.
+  edge: {}
+  # Outbound HTTPS for mcp (OAuth client metadata documents) and certbot (Let's Encrypt).
+  egress: {}
+
+volumes:
+  db_data:
+  mcp_data:

@@ -6,3 +6,7 @@ coverage/
 # MCP server SQLite storage (packages/mcp/data/app.sqlite by default)
 **/data/*.sqlite
 **/data/*.sqlite-*
+# Deployment: secrets, certificates, backups
+deploy/.env
+deploy/certbot/
+deploy/backups/

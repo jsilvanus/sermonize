@@ -1,0 +1,18 @@
+# Build context for the root Dockerfile: sources and manifests only.
+**/node_modules
+**/dist
+**/coverage
+**/*.log
+**/.env
+**/.env.*
+!**/.env.example
+**/data/*.sqlite
+**/data/*.sqlite-*
+.git
+.github
+docs
+deploy/.env
+deploy/certbot
+deploy/backups
+*.md
+**/*.md
