@@ -4,6 +4,7 @@ import { TypeBoxValidatorCompiler, type TypeBoxTypeProvider } from '@fastify/typ
 import type { Pool } from 'pg';
 import { authPlugin } from './plugins/auth.js';
 import { dbPlugin } from './plugins/db.js';
+import { openApiPlugin } from './plugins/openapi.js';
 import { registerErrorHandlers } from './plugins/errors.js';
 import { adminRoutes } from './routes/admin.js';
 import { healthRoutes } from './routes/health.js';
@@ -35,6 +36,7 @@ export async function buildApp({ pool, logger = false, maxBatchItems = 5000 }: B
 
   await app.register(dbPlugin, { pool });
   await app.register(authPlugin);
+  await app.register(openApiPlugin); // before the routes it documents
 
   await app.register(healthRoutes);
   await app.register(meRoutes);

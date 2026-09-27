@@ -28,6 +28,8 @@ small enough for one agent. Every phase ends with green checks and a commit.
 
 ## Phase 1: Foundation, schema, identity and audit
 
+> **Status: done** (commit `e2d81fc`). Deviation: `GET /me` added so scripts can check a token without a role.
+
 Deliverables:
 - Project skeleton: `package.json`, `tsconfig.json`, `vitest.config.ts`, `src/app.ts` (app factory
   `buildApp({ pool })`), `src/server.ts`, `src/config.ts`, `.env.example`, `.gitignore`.
@@ -73,6 +75,9 @@ Deliverables:
 
 ## Phase 2: Scholarly layer API
 
+> **Status: done** (commit `176bc56`). Additions: `POST /works` accepts `persons`/`occasion` and `POST /texts`
+> `persons`, so contributors can attribute what they create (the `PUT` endpoints need curator).
+
 Deliverables (`src/routes/scholarly/*`):
 - persons, works (+ `PUT /works/:id/persons`, `PUT /works/:id/occasion`), sources, texts
   (+ `PUT /texts/:id/persons`), with create, get, list (filters below), PATCH (curator+), withdraw (curator+).
@@ -92,6 +97,10 @@ Deliverables (`src/routes/scholarly/*`):
   multiple originals per work allowed, work with only a translation allowed, PATCH audit rows.
 
 ## Phase 3: Segmentations, chunks, embedding spaces, embeddings, search
+
+> **Status: done** (commit `dc7cc2a`). Additions: `GET /texts/:id/segmentations`, `?include_embeddings`/`include_vectors`
+> on `GET /chunks/:id`, `hnsw_index` state on spaces, CLI `drop-index`, `date_basis` search filter.
+> `GET /chunks/:id/provenance` moved to Phase 4.
 
 Deliverables (`src/routes/derived/*`):
 - `POST /segmentations` (contributor+, requires `producer`), `GET /segmentations/:id`, `GET /texts/:id/segmentations`.
@@ -122,6 +131,21 @@ Deliverables (`src/routes/derived/*`):
   restricted exclusion, index creation + search still correct.
 
 ## Phase 4: Clustering, labels, reviews, provenance, API docs
+
+> **Status: done.** Deviations and decisions:
+> - Migration `0002_clustering_completion` (0001 unchanged): `cluster.size` can be filled once while the run is
+>   open, completion is checked in the database (≥ 1 membership, sizes match, NULL sizes filled), and
+>   `clustering_run.withdrawn_reason` was added so a withdrawal records why (like other withdrawals).
+> - `cluster.size` counts the memberships of the cluster **and its descendants** (flat clusterings: direct members);
+>   `member_count` in responses is the direct count and `GET /clusters/:id/members` lists direct members.
+> - Readers see `complete` runs only; open/withdrawn runs and everything under them need contributor+.
+>   Labels can only be added to clusters of complete runs; labels of withdrawn runs cannot be reviewed.
+> - Restricted chunks in member lists and chunk provenance are returned with `text: null` for readers
+>   (metadata stays visible), rather than a 403 for the whole response.
+> - Added `GET /clustering-runs/:id/clusters` (runs were otherwise not navigable) and `GET /labels/:id` (with reviews);
+>   centroids are returned only with `GET /clusters/:id?include_centroid=true` (contributor+).
+> - `/docs` and `/docs/json` are public; the OpenAPI document declares bearer security globally and `security: []`
+>   on public routes.
 
 Deliverables:
 - `POST /clustering-runs` (contributor+, requires `producer`), `GET /clustering-runs?embedding_space_id=&status=`

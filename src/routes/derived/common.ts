@@ -83,3 +83,15 @@ export function assertCanReadRestricted(principal: Principal, effectiveAccessLev
     throw forbidden(`${what} of restricted texts require role contributor or higher`);
   }
 }
+
+export type RunStatus = 'open' | 'complete' | 'withdrawn';
+
+/**
+ * Readers see complete clustering runs only; open and withdrawn runs (and their
+ * clusters, memberships and labels) need contributor+.
+ */
+export function assertCanReadRun(principal: Principal, status: RunStatus): void {
+  if (status !== 'complete' && !hasRole(principal, 'contributor')) {
+    throw forbidden(`${status} clustering runs require role contributor or higher`);
+  }
+}

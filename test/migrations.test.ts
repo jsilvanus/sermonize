@@ -11,9 +11,9 @@ describe('migrations', () => {
   });
   afterAll(() => pool.end());
 
-  it('applied 0001_init and re-running is a no-op', async () => {
+  it('applied all migrations and re-running is a no-op', async () => {
     const { rows } = await pool.query('SELECT version FROM schema_migrations ORDER BY version');
-    expect(rows.map((r) => r.version)).toContain('0001_init');
+    expect(rows.map((r) => r.version)).toEqual(expect.arrayContaining(['0001_init', '0002_clustering_completion']));
     expect(await migrate(pool)).toEqual([]);
   });
 

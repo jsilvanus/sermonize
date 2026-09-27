@@ -10,7 +10,7 @@ declare module 'fastify' {
     principal: Principal | null;
   }
   interface FastifyContextConfig {
-    /** Route is reachable without authentication (only GET /health in v1). */
+    /** Route is reachable without authentication (GET /health and the /docs routes). */
     public?: boolean;
   }
 }

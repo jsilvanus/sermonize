@@ -149,7 +149,7 @@ const WORK_FIELDS_SQL = [...WORK_COLUMNS, 'id', 'withdrawn_at', 'withdrawn_by', 
   .map((c) => (c === 'original_languages' ? 'w.original_languages::text[] AS original_languages' : `w.${c}`))
   .join(', ');
 
-async function getWork(db: Db, id: string) {
+export async function getWork(db: Db, id: string) {
   const { rows } = await db.query(
     `SELECT ${WORK_FIELDS_SQL},
        coalesce((SELECT json_agg(json_build_object('person_id', wp.person_id, 'display_name', p.display_name,

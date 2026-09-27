@@ -83,7 +83,7 @@ const spaceColumns = {
   created_by: Uuid,
   created_at: DateTime,
 };
-const SpaceSummary = Type.Object(spaceColumns);
+export const SpaceSummary = Type.Object(spaceColumns);
 const SpaceSchema = Type.Object({
   ...spaceColumns,
   hnsw_index: Type.Union([Type.Literal('absent'), Type.Literal('valid'), Type.Literal('invalid')], {
@@ -91,7 +91,7 @@ const SpaceSchema = Type.Object({
   }),
 });
 
-const SPACE_FIELDS_SQL = [...SPACE_COLUMNS, 'withdrawn_at', 'withdrawn_by', 'withdrawn_reason', 'created_by', 'created_at']
+export const SPACE_FIELDS_SQL = [...SPACE_COLUMNS, 'withdrawn_at', 'withdrawn_by', 'withdrawn_reason', 'created_by', 'created_at']
   .map((c) => `es.${c}`)
   .join(', ');
 

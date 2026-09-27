@@ -7,6 +7,8 @@ Build a multilingual theological-text corpus and semantic research API for sermo
 The first version is intentionally **data-only**: the API stores and retrieves source texts, chunks, embeddings, clusters, and labels. AI processing is performed by external tools/scripts and submitted to the API. The API does not contain an AI processing pipeline, worker queue, or job orchestration.
 
 The data model was revised after a critical review: see [`docs/data-model-review.md`](docs/data-model-review.md) for the reasoning and [`docs/implementation-plan.md`](docs/implementation-plan.md) for the build plan.
+[`docs/api-examples.md`](docs/api-examples.md) walks through the whole API with curl; the running server
+publishes its OpenAPI document at `/docs` (Swagger UI) and `/docs/json`.
 
 ## Architecture
 
@@ -165,14 +167,15 @@ Any change to model, revision, prefixes, normalisation or metric means a **new**
 
 **clustering_run**
 - id, embedding_space_id, algorithm, parameters jsonb, metric, input_filter jsonb (descriptive only),
-  producer, status (`open | complete | withdrawn`), completed_at, metadata
+  producer, status (`open | complete | withdrawn`), completed_at, withdrawn_reason, metadata
 
 A run is posted in several requests while `open`. When it's marked `complete`, the run and its
-clusters and memberships are frozen. Readers see only `complete` runs by default.
+clusters and memberships are frozen. Readers see only `complete` runs (a curator can withdraw a run, with a reason).
 
 **cluster**
 - id, clustering_run_id, cluster_number, centroid vector NULL, size int NULL, parent_cluster_id NULL, metadata
-- UNIQUE (clustering_run_id, cluster_number)
+- UNIQUE (clustering_run_id, cluster_number). The parent must be in the same run.
+- `size` = memberships of the cluster **and its descendants**; filled (or verified) when the run is completed.
 
 **cluster_membership**: the full input set of the run.
 - clustering_run_id, embedding_id, cluster_id NULL (NULL = noise/unassigned), distance NULL, score NULL, metadata
@@ -232,7 +235,7 @@ Access level covers derived data too: chunks and embeddings of restricted texts 
 - id, occurred_at, actor_id, action (`insert | update | delete | withdraw | batch_insert | status_change |
   token_create | token_revoke | pii_update`; `delete` only for the replaceable join tables),
   entity_type, entity_id NULL, batch_count NULL, request_id, changes jsonb
-- Row-level for curated tables. One event per batch for bulk derived data (chunks, embeddings,
+- Row-level for curated tables. One event per batch for bulk derived data (chunks, embeddings, clusters,
   memberships). INSERT-only. Never contains values from `private`.
 
 ## Provenance
@@ -286,6 +289,7 @@ Derived (batch endpoints accept up to 5,000 items and are idempotent on natural 
   `POST /clustering-runs/:id/memberships`, `POST /clustering-runs/:id/complete`, `POST /clustering-runs/:id/withdraw`
 - `GET /clusters/:id`, `GET /clusters/:id/members`, `GET /clusters/:id/provenance`
 - `POST /clusters/:id/labels`, `GET /clusters/:id/labels`, `POST /labels/:id/reviews`
+- Added in Phase 4: `GET /clustering-runs/:id/clusters`, `GET /labels/:id` (with its reviews)
 
 Derived API details (added in Phase 3, where the spec above left them open):
 - Creating segmentations, chunks, embedding spaces and embeddings needs `contributor`. Also
@@ -329,13 +333,54 @@ Derived API details (added in Phase 3, where the spec above left them open):
   - Vectors are compared as `vector(N)` for N ≤ 2000, `halfvec(N)` for 2000 < N ≤ 4000 (with or without an
     index, so results do not change when one is built) and `vector(N)` above 4000 (exact scan; not indexable).
 
+Clustering, label and provenance details (added in Phase 4):
+- Creating runs, clusters, memberships and labels and completing runs needs `contributor`; withdrawing a run
+  (`{ "reason" }`, required) and reviewing labels need `curator`.
+- **Visibility:** readers see `complete` runs only. `GET /clustering-runs` defaults to `?status=complete`;
+  `open`, `withdrawn` and `all` need `contributor`, as do the run, its clusters, members, labels and
+  provenance while the run is open or withdrawn (403 otherwise).
+- `POST /clustering-runs` takes `{ id?, embedding_space_id, algorithm, parameters?, metric?, input_filter?, producer, metadata? }`
+  (`metric` defaults to the space's metric; `status` is always `open`). The space must exist (422) and not be withdrawn (409).
+  `GET /clustering-runs/:id` adds `cluster_count`, `input_size` (memberships) and `noise_count`.
+- Batches follow the chunk/embedding rules above (all-or-nothing 422/409, `{ inserted, skipped }`, one audit event):
+  - `POST /clustering-runs/:id/clusters`: `[{ id?, cluster_number, centroid?, size?, parent_cluster_number?, metadata? }]`,
+    idempotent on `(run, cluster_number)`. A parent may be stored already or be in the same batch (in any order);
+    unknown parents, self-parents and cycles are 422. Centroids must have the space's dimension.
+  - `POST /clustering-runs/:id/memberships`: `[{ embedding_id, cluster_number | null, distance?, score?, metadata? }]`
+    (`null` = noise), idempotent on `(run, embedding)`. Post clusters first. The embedding must exist, be in the run's
+    space and its chunk must not be withdrawn; the cluster must belong to the run (422 per item).
+  - Both are 409 once the run is not `open`.
+- `POST /clustering-runs/:id/complete` (open → complete): 409 without memberships, and 409 with
+  `details.mismatches: [{ cluster_number, size, member_count }]` when a client-supplied `size` differs from the
+  membership count (cluster + descendants). NULL sizes are filled. Afterwards the run, its clusters and memberships are frozen.
+  `POST /clustering-runs/:id/withdraw`: open or complete → withdrawn; other transitions are 409.
+- `GET /clustering-runs/:id/clusters` (paginated by `cluster_number`) and `GET /clusters/:id` include
+  `parent_cluster_number` and `member_count` (direct members); `GET /clusters/:id?include_centroid=true` (contributor+) adds the centroid.
+- `GET /clusters/:id/members` lists the **direct** members (paginated by embedding id) with a chunk summary (offsets, locus,
+  effective language, hash, `restricted`, `withdrawn`), text and work. For readers, restricted chunks are listed with
+  `text: null` (their metadata stays visible, like `GET /texts/:id` versus its body).
+- Labels: `POST /clusters/:id/labels` `{ id?, language, label, description?, producer_kind, model?, model_version?, producer?,
+  supersedes_label_id?, metadata? }`. `model` needs `model` and `producer`; `human` needs neither and may not set `model`/`model_version`.
+  Only clusters of `complete` runs can be labelled (409). `supersedes_label_id` must be a label of the same cluster (422).
+  Labels carry the derived `status` (latest review by `(created_at, id)`, else `proposed`), `superseded`, `superseded_by`
+  and `review_count`; `GET /clusters/:id/labels?language=` lists them.
+- `POST /labels/:id/reviews` `{ decision: accepted | rejected | needs_revision, note? }` (409 for withdrawn runs);
+  `reviewer_id` is the caller. Reviews only ever expose reviewer ids, never account PII.
+- `GET /chunks/:id/provenance` → `{ chunk, segmentation, text, source, work, persons, embeddings, cluster_memberships }`:
+  the chunk (text `null` for readers if restricted), its segmentation and producer, the text (hash, persons), source,
+  work (authors, sermon occasion), every linked person, its embeddings with space summaries, and its memberships in
+  runs the caller may see.
+- `GET /clusters/:id/provenance` → `{ cluster, run, embedding_space, input: { size, noise_count, cluster_count }, labels }`
+  with the run's algorithm, parameters, producer and status, and every label with its reviews.
+
 Admin:
 - `POST /admin/users`, `POST /admin/users/:id/tokens`, `DELETE /admin/tokens/:id`
 - CLI: `npm run cli -- create-user`, `create-token`, `revoke-token`, `migrate`, `create-index <embedding_space_id>`,
   `drop-index <embedding_space_id>`
 
 Other:
-- `GET /health` (the only unauthenticated route), `GET /me` (the caller's own user id, role and kind;
+- `GET /health` and the API documentation `GET /docs` (Swagger UI), `GET /docs/json` (OpenAPI 3) are the only
+  unauthenticated routes; the document declares bearer-token security for everything else. `GET /me` (the caller's own user id, role and kind;
   added in Phase 1 so that scripts can check a token without needing any particular role)
 
 ### Semantic search
@@ -386,8 +431,8 @@ Scripts:
 | `npm run cli -- <command>` | `migrate`, `create-user`, `create-token`, `revoke-token`, `create-index`, `drop-index` (see `npm run cli -- help`) |
 
 Layout: `src/db` (pool, migration runner, `withTransaction`), `src/plugins` (db, auth, error
-handling), `src/routes` (`scholarly/` for persons, works, sources, texts; `derived/` for segmentations, chunks,
-embedding spaces, embeddings, search), `src/lib` (principal/roles, errors, tokens, users, batch audit,
+handling, OpenAPI), `src/routes` (`scholarly/` for persons, works, sources, texts; `derived/` for segmentations, chunks,
+embedding spaces, embeddings, search, clustering runs, clusters, labels, provenance), `src/lib` (principal/roles, errors, tokens, users, batch audit,
 `pagination.ts` keyset cursors, `sql.ts` whitelisted INSERT/UPDATE builders, `vector.ts` casts/operators/literals,
 `vector-index.ts` HNSW index management),
 `migrations/` (SQL), `sql/roles.sql` (ops), `test/` (`helpers.ts` is the shared test toolkit).
@@ -418,6 +463,11 @@ deletes of withdrawable records, clusters/memberships for runs that are not `ope
 whose dimension differs from their space, and memberships whose embedding is in another space.
 Trigger errors use SQLSTATEs `SZ002` (→ 409 `immutable`), `SZ003` (→ 409 `conflict`) and
 `SZ004` (→ 422 `validation_failed`).
+
+Migration `0002_clustering_completion` adds the completion rules: `cluster.size` may only be filled once
+(NULL → value) while the run is open; `open → complete` requires at least one membership, rejects sizes that
+differ from the membership counts (`cluster_subtree_counts(run)`), and fills NULL sizes; `withdrawn_reason`
+can only be set by the withdraw transition.
 
 ## Explicit non-goals for v1
 

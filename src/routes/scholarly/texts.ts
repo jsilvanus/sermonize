@@ -138,7 +138,7 @@ const TEXT_FIELDS_SQL = `${[...TEXT_COLUMNS, 'id', 'content_sha256', 'char_lengt
   .join(', ')}, ${EFFECTIVE_ACCESS_SQL} AS effective_access_level`;
 const TEXT_FROM_SQL = 'FROM text t LEFT JOIN source s ON s.id = t.source_id';
 
-async function getText(db: Db, id: string) {
+export async function getText(db: Db, id: string) {
   const { rows } = await db.query(
     `SELECT ${TEXT_FIELDS_SQL},
        coalesce((SELECT json_agg(json_build_object('person_id', tp.person_id, 'display_name', p.display_name,

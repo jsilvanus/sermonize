@@ -56,7 +56,7 @@ const segmentationColumns = {
   created_at: DateTime,
 };
 const SegmentationSummary = Type.Object(segmentationColumns);
-const SegmentationSchema = Type.Object({
+export const SegmentationSchema = Type.Object({
   ...segmentationColumns,
   chunk_count: Type.Integer(),
 });
@@ -65,7 +65,7 @@ const SEGMENTATION_FIELDS_SQL = [...SEGMENTATION_COLUMNS, 'withdrawn_at', 'withd
   .map((c) => `sg.${c}`)
   .join(', ');
 
-async function getSegmentation(db: Db, id: string) {
+export async function getSegmentation(db: Db, id: string) {
   const { rows } = await db.query(
     `SELECT ${SEGMENTATION_FIELDS_SQL},
             (SELECT count(*)::int FROM chunk c WHERE c.segmentation_id = sg.id) AS chunk_count

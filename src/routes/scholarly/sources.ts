@@ -82,7 +82,7 @@ export const SourceSchema = Type.Object({
   ...AuditFields,
 });
 
-async function getSource(db: Db, id: string) {
+export async function getSource(db: Db, id: string) {
   const { rows } = await db.query('SELECT * FROM source WHERE id = $1', [id]);
   if (!rows[0]) throw notFound('source not found');
   return rows[0];
