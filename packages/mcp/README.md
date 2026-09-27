@@ -177,6 +177,7 @@ the web UI does not use, so a reverse proxy routes by prefix:
 | `/api/` (prefix stripped) | API |
 | everything else | web UI |
 
+[`docs/deployment.md`](../../docs/deployment.md) is a complete nginx + Docker Compose setup for exactly this layout.
 `/health` is also served, for the container health check (not needed publicly). The sign-in form posts to
 the relative `/oauth/authorize`, and the CSP `form-action` is `'self'` plus the OAuth client's redirect origin
 (see `LEARNED.md`).

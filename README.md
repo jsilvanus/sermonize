@@ -9,6 +9,8 @@ The first version is intentionally **data-only**: the API stores and retrieves s
 The data model was revised after a critical review: see [`docs/data-model-review.md`](docs/data-model-review.md) for the reasoning and [`docs/implementation-plan.md`](docs/implementation-plan.md) for the build plan.
 [`docs/api-examples.md`](docs/api-examples.md) walks through the whole API with curl; the running server
 publishes its OpenAPI document at `/docs` (Swagger UI) and `/docs/json`.
+[`docs/deployment.md`](docs/deployment.md) describes the production deployment (Docker Compose, nginx, one domain:
+web UI at `/`, API at `/api/`, MCP at `/mcp`).
 
 ## Repository layout
 
@@ -17,7 +19,9 @@ This is an npm-workspaces monorepo (ESM everywhere, one root `package-lock.json`
 ```
 sermonize/
 ├── package.json            workspaces + root scripts
-├── docs/                   design notes, data-model review, API walkthrough
+├── Dockerfile              production images (targets api, mcp, web, tools)
+├── deploy/                 docker-compose.yml, nginx, .env.example, ops scripts (docs/deployment.md)
+├── docs/                   design notes, data-model review, API walkthrough, deployment guide
 └── packages/
     ├── api/                @sermonize/api: the REST API (this README)
     │   ├── src/  test/  migrations/  sql/roles.sql
@@ -111,7 +115,7 @@ Bootstrap once, then work over HTTP:
 npm run migrate
 read -rs PW && printf '%s\n' "$PW" | npm run --silent cli -- create-user --kind human --role admin \
   --email you@example.org --password-stdin          # prints the new admin's id
-export SERMONIZE_API_URL=https://api.example.org    # default http://127.0.0.1:3000
+export SERMONIZE_API_URL=https://example.org/api    # default http://127.0.0.1:3000 (a path prefix is fine)
 npm run admin -- login --email you@example.org      # hidden password prompt; token saved with mode 0600
 npm run admin -- users list --role admin
 npm run admin -- users set-role <user-id> curator
@@ -593,6 +597,8 @@ which migration `0001_init` creates for bootstrapping.
 
 Environment: `DATABASE_URL`, `TEST_DATABASE_URL`, `PORT` (3000), `HOST` (127.0.0.1),
 `LOG_LEVEL` (info), `MAX_BATCH_ITEMS` (5000), `TRUST_PROXY` (false; `true` or comma-separated proxy addresses/CIDRs),
+`PUBLIC_BASE_PATH` (unset; e.g. `/api` when a reverse proxy publishes the API under that prefix with the prefix
+stripped: sets the OpenAPI `servers` entry and the Swagger UI asset URLs, routes stay at the root),
 `REGISTRATION_OPEN` (false), `REGISTRATION_DEFAULT_ROLE` (reader; only `reader`/`contributor`),
 `LOGIN_TOKEN_TTL_HOURS` (12, web sign-in), `MCP_LOGIN_TOKEN_TTL_HOURS` (720, MCP sign-in), `CLI_LOGIN_TOKEN_TTL_HOURS` (12, `sermonize-admin login`), `AUTH_RATE_LIMIT_MAX` (10; 0 disables), `AUTH_RATE_LIMIT_WINDOW_SECONDS` (60).
 Invalid values stop the server at startup.

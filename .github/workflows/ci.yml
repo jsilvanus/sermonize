@@ -37,3 +37,37 @@ jobs:
       # Workspaces run one after another: the API suite resets the shared test
       # database's schemas, the MCP suite only adds its own rows to it.
       - run: npm test
+
+  # Validates the production deployment (deploy/, Dockerfile) without any real secrets:
+  # compose file, all image targets, and the rendered nginx configuration.
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Throwaway deploy/.env (fresh random secrets, test domain)
+        run: sh deploy/scripts/init-env.sh ci.sermonize.test
+      - name: docker compose config
+        run: |
+          docker compose -f deploy/docker-compose.yml config --quiet
+          docker compose -f deploy/docker-compose.yml --profile certbot --profile tools config --quiet
+          # The example must not ship secrets: they stay empty there (init-env.sh fills them).
+          test -z "$(grep -E '^(POSTGRES_PASSWORD|SERMONIZE_APP_DB_PASSWORD|MCP_JWT_SECRET|MCP_TOKEN_KEY|WEB_COOKIE_SECRET)=.+' deploy/.env.example)"
+      - name: Shell scripts (POSIX sh syntax)
+        run: for f in deploy/scripts/*.sh; do sh -n "$f"; done
+      - name: Build image targets
+        run: |
+          for target in api mcp web tools; do
+            docker build --target "$target" -t "sermonize-$target:latest" .
+          done
+      - name: Smoke-test the images
+        run: |
+          docker run --rm sermonize-tools:latest sermonize-db help > /dev/null
+          docker run --rm sermonize-tools:latest sermonize-admin --help > /dev/null
+          docker run --rm sermonize-tools:latest psql --version
+          for target in api mcp web; do
+            test "$(docker run --rm --entrypoint id sermonize-$target:latest -u)" != 0
+          done
+      - name: nginx -t with a self-signed certificate
+        run: |
+          sh deploy/scripts/self-signed.sh
+          docker compose -f deploy/docker-compose.yml run --rm --no-deps nginx nginx -t

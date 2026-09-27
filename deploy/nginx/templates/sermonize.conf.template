@@ -1,0 +1,179 @@
+# Sermonize on one domain (DOMAIN from deploy/.env).
+#
+#   /                                               -> web   (web:3100)
+#   /mcp, /oauth/, /.well-known/oauth-*,
+#   /.well-known/openid-configuration               -> mcp   (mcp:5999)
+#   /api/  (prefix stripped: /api/x -> /x)          -> api   (api:3000)
+#
+# Rendered by the nginx image's entrypoint; only the DOMAIN and NGINX_LOCAL_RESOLVERS variables are
+# substituted (NGINX_ENVSUBST_FILTER in docker-compose.yml), so nginx's own $variables stay as they are.
+
+# Docker's embedded DNS; `resolve` below re-resolves the containers when they are recreated.
+resolver ${NGINX_LOCAL_RESOLVERS} valid=10s ipv6=off;
+resolver_timeout 5s;
+
+upstream sermonize_web {
+    zone sermonize_web 64k;
+    server web:3100 resolve;
+    keepalive 16;
+}
+
+upstream sermonize_api {
+    zone sermonize_api 64k;
+    server api:3000 resolve;
+    keepalive 16;
+}
+
+upstream sermonize_mcp {
+    zone sermonize_mcp 64k;
+    server mcp:5999 resolve;
+    keepalive 16;
+}
+
+# ------------------------------------------------------------------------------------------------
+# Port 80: ACME http-01 challenges, the container health check, redirect everything else.
+
+server {
+    listen 80 default_server;
+    server_name _;
+
+    # Container health check (docker-compose.yml); local only.
+    location = /nginx-health {
+        allow 127.0.0.1;
+        deny all;
+        access_log off;
+        default_type text/plain;
+        return 200 "ok\n";
+    }
+
+    location ^~ /.well-known/acme-challenge/ {
+        root /var/www/certbot;
+        default_type text/plain;
+    }
+
+    location / {
+        return 444;
+    }
+}
+
+server {
+    listen 80;
+    server_name ${DOMAIN};
+
+    location ^~ /.well-known/acme-challenge/ {
+        root /var/www/certbot;
+        default_type text/plain;
+    }
+
+    location / {
+        return 301 https://${DOMAIN}$request_uri;
+    }
+}
+
+# ------------------------------------------------------------------------------------------------
+# Port 443: unknown host names get no certificate at all.
+
+server {
+    listen 443 ssl default_server;
+    server_name _;
+    ssl_reject_handshake on;
+}
+
+server {
+    listen 443 ssl;
+    http2 on;
+    server_name ${DOMAIN};
+
+    ssl_certificate     /etc/letsencrypt/live/${DOMAIN}/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/${DOMAIN}/privkey.pem;
+    include /etc/nginx/sermonize/snippets/tls.conf;
+
+    include /etc/nginx/sermonize/snippets/hsts.conf;
+
+    # --- MCP server: resource endpoint (Streamable HTTP) ------------------------------------------
+    location = /mcp {
+        include /etc/nginx/sermonize/snippets/proxy.conf;
+        include /etc/nginx/sermonize/snippets/app-headers.conf;
+        # Responses may be streamed (text/event-stream): no buffering, no compression, long reads.
+        proxy_buffering off;
+        proxy_cache off;
+        proxy_request_buffering off;
+        gzip off;
+        proxy_read_timeout 3600s;
+        proxy_send_timeout 3600s;
+        client_max_body_size 4m;
+        proxy_pass http://sermonize_mcp;
+    }
+
+    # --- MCP server: embedded OAuth authorization server and discovery -----------------------------
+    location ^~ /oauth/ {
+        include /etc/nginx/sermonize/snippets/proxy.conf;
+        include /etc/nginx/sermonize/snippets/hsts.conf;
+        add_header X-Content-Type-Options "nosniff" always;
+        add_header Referrer-Policy "no-referrer" always;
+        proxy_pass http://sermonize_mcp;
+    }
+
+    location = /.well-known/oauth-protected-resource {
+        include /etc/nginx/sermonize/snippets/proxy.conf;
+        include /etc/nginx/sermonize/snippets/app-headers.conf;
+        proxy_pass http://sermonize_mcp;
+    }
+
+    location = /.well-known/oauth-protected-resource/mcp {
+        include /etc/nginx/sermonize/snippets/proxy.conf;
+        include /etc/nginx/sermonize/snippets/app-headers.conf;
+        proxy_pass http://sermonize_mcp;
+    }
+
+    location = /.well-known/oauth-authorization-server {
+        include /etc/nginx/sermonize/snippets/proxy.conf;
+        include /etc/nginx/sermonize/snippets/app-headers.conf;
+        proxy_pass http://sermonize_mcp;
+    }
+
+    location = /.well-known/openid-configuration {
+        include /etc/nginx/sermonize/snippets/proxy.conf;
+        include /etc/nginx/sermonize/snippets/app-headers.conf;
+        proxy_pass http://sermonize_mcp;
+    }
+
+    # Nothing else under /.well-known/ exists on this site.
+    location ^~ /.well-known/ {
+        return 404;
+    }
+
+    # --- REST API under /api/ (the API's routes are at its root) -----------------------------------
+    location = /api {
+        return 301 https://${DOMAIN}/api/;
+    }
+
+    # User and token administration: optional address allowlist (admin-allow.conf, empty by default).
+    location ^~ /api/admin/ {
+        include /etc/nginx/sermonize/admin-allow.conf;
+        include /etc/nginx/sermonize/snippets/proxy.conf;
+        include /etc/nginx/sermonize/snippets/app-headers.conf;
+        proxy_redirect / /api/;
+        proxy_pass http://sermonize_api/admin/;
+    }
+
+    location ^~ /api/ {
+        include /etc/nginx/sermonize/snippets/proxy.conf;
+        include /etc/nginx/sermonize/snippets/app-headers.conf;
+        # Batch ingestion (up to MAX_BATCH_ITEMS chunks/embeddings per request): the API's own
+        # body limit is 64 MiB. Large batches may take a while to validate and insert.
+        client_max_body_size 64m;
+        client_body_buffer_size 1m;
+        proxy_read_timeout 300s;
+        proxy_send_timeout 300s;
+        # Root-relative redirects of the API (e.g. Swagger UI's /docs/static/index.html -> /docs/).
+        proxy_redirect / /api/;
+        proxy_pass http://sermonize_api/;
+    }
+
+    # --- Web UI: everything else --------------------------------------------------------------------
+    location / {
+        include /etc/nginx/sermonize/snippets/proxy.conf;
+        proxy_pass http://sermonize_web;
+    }
+}
