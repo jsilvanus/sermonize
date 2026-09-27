@@ -1,6 +1,9 @@
 # Data model review
 
-Status: proposal / review of the model in `README.md`. Nothing here is implemented yet.
+Status: accepted. The corrected model is in `README.md`; the build plan is in
+`docs/implementation-plan.md`. v1 implements all MUST items plus the SHOULD items
+work_person, text_person, work hierarchy, external ids, sermon occasion, chunk locus
+and chunk language. `text_division` is deferred.
 
 ## Decisions recorded
 
