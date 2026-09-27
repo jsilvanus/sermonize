@@ -10,6 +10,41 @@ The data model was revised after a critical review: see [`docs/data-model-review
 [`docs/api-examples.md`](docs/api-examples.md) walks through the whole API with curl; the running server
 publishes its OpenAPI document at `/docs` (Swagger UI) and `/docs/json`.
 
+## Repository layout
+
+This is an npm-workspaces monorepo (ESM everywhere, one root `package-lock.json`):
+
+```
+sermonize/
+├── package.json            workspaces + root scripts
+├── docs/                   design notes, data-model review, API walkthrough
+└── packages/
+    ├── api/                @sermonize/api: the REST API (this README)
+    │   ├── src/  test/  migrations/  sql/roles.sql
+    │   └── package.json
+    └── mcp/                @sermonize/mcp: thin MCP server that relays to the REST API
+        └── README.md       see packages/mcp/README.md
+```
+
+- **`@sermonize/api`** owns the data: PostgreSQL + pgvector, auth, roles, audit. Everything
+  below describes it.
+- **`@sermonize/mcp`** is a remote MCP server (Streamable HTTP + OAuth) that lets MCP clients use
+  the API. It talks only to the REST API over HTTP, with each MCP user's own API token, and
+  contains no domain logic or AI processing. See [`packages/mcp/README.md`](packages/mcp/README.md).
+
+Root scripts (run from the repository root):
+
+| script | does |
+|---|---|
+| `npm install` | installs all workspaces |
+| `npm run typecheck` / `npm run build` / `npm test` | runs the workspace script in every package, one package after another |
+| `npm run dev:api` / `npm run dev:mcp` | API (port 3000) / MCP server (port 5999) with reload |
+| `npm run migrate` | apply API migrations to `DATABASE_URL` |
+| `npm run cli -- <command>` | the API admin CLI (see below) |
+| `npm run mcp-user -- <command>` | the MCP user CLI (see `packages/mcp/README.md`) |
+
+A single package can be targeted with `-w`, e.g. `npm test -w @sermonize/api`.
+
 ## Architecture
 
 - Node.js (≥ 22) + TypeScript, ESM only
@@ -403,13 +438,13 @@ a role that owns the `embedding` table (e.g. `OWNER_DATABASE_URL`), not `sermoni
 Requirements: Node.js ≥ 22.12, PostgreSQL ≥ 16 with pgvector ≥ 0.8.
 
 ```sh
-npm install
-cp .env.example .env            # then export the variables (the app reads process.env only)
+npm install                     # at the repository root (all workspaces)
+cp packages/api/.env.example packages/api/.env   # then export the variables (the app reads process.env only)
 export DATABASE_URL=postgres://sermonize:sermonize@localhost:5432/sermonize
-npm run migrate                 # applies migrations/*.sql (recorded in schema_migrations)
+npm run migrate                 # applies packages/api/migrations/*.sql (recorded in schema_migrations)
 npm run cli -- create-user --kind human --role admin --email you@example.org   # prints the user id
 npm run cli -- create-token --user <user-id> --name laptop                     # prints the token once
-npm run dev                     # http://127.0.0.1:3000/health
+npm run dev:api                 # http://127.0.0.1:3000/health
 curl -H "Authorization: Bearer <token>" http://127.0.0.1:3000/me
 ```
 
@@ -419,25 +454,25 @@ which migration `0001_init` creates for bootstrapping.
 Environment: `DATABASE_URL`, `TEST_DATABASE_URL`, `PORT` (3000), `HOST` (127.0.0.1),
 `LOG_LEVEL` (info), `MAX_BATCH_ITEMS` (5000).
 
-Scripts:
+Scripts of `packages/api` (run them there, with `-w @sermonize/api` from the root, or via the root scripts above):
 
 | script | does |
 |---|---|
 | `npm run dev` | API with reload (tsx watch) |
 | `npm run build` / `npm start` | compile to `dist/` / run the compiled server |
 | `npm run typecheck` | `tsc --noEmit` over `src/` and `test/` |
-| `npm test` | vitest against `TEST_DATABASE_URL` (default `postgres://sermonize:sermonize@localhost:5432/sermonize_test`). **Drops and recreates the `public` and `private` schemas** of that database once per run, then applies all migrations. Test files run one at a time. |
+| `npm test` | vitest (in `packages/api`) against `TEST_DATABASE_URL` (default `postgres://sermonize:sermonize@localhost:5432/sermonize_test`). **Drops and recreates the `public` and `private` schemas** of that database once per run, then applies all migrations. Test files run one at a time. |
 | `npm run migrate` | apply pending migrations to `DATABASE_URL` |
 | `npm run cli -- <command>` | `migrate`, `create-user`, `create-token`, `revoke-token`, `create-index`, `drop-index` (see `npm run cli -- help`) |
 
-Layout: `src/db` (pool, migration runner, `withTransaction`), `src/plugins` (db, auth, error
+Layout (under `packages/api/`): `src/db` (pool, migration runner, `withTransaction`), `src/plugins` (db, auth, error
 handling, OpenAPI), `src/routes` (`scholarly/` for persons, works, sources, texts; `derived/` for segmentations, chunks,
 embedding spaces, embeddings, search, clustering runs, clusters, labels, provenance), `src/lib` (principal/roles, errors, tokens, users, batch audit,
 `pagination.ts` keyset cursors, `sql.ts` whitelisted INSERT/UPDATE builders, `vector.ts` casts/operators/literals,
 `vector-index.ts` HNSW index management),
 `migrations/` (SQL), `sql/roles.sql` (ops), `test/` (`helpers.ts` is the shared test toolkit).
 
-### Database roles (`sql/roles.sql`)
+### Database roles (`packages/api/sql/roles.sql`)
 
 Migrations run as the schema owner. The API should connect as a separate, least-privileged
 role. `sql/roles.sql` is an idempotent ops script (not a migration) that creates `sermonize_app`
@@ -448,7 +483,7 @@ functions `private.resolve_token`, `create_api_token`, `revoke_api_token`, `set_
 Re-run it after every migration that adds tables or functions:
 
 ```sh
-psql "$OWNER_DATABASE_URL" -v ON_ERROR_STOP=1 -f sql/roles.sql
+psql "$OWNER_DATABASE_URL" -v ON_ERROR_STOP=1 -f packages/api/sql/roles.sql
 psql "$OWNER_DATABASE_URL" -c "ALTER ROLE sermonize_app PASSWORD '…'"
 ```
 

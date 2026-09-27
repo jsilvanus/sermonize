@@ -18,7 +18,7 @@ The OpenAPI document of the running server is at `/docs` (Swagger UI) and `/docs
 ```sh
 export DATABASE_URL=postgres://sermonize:sermonize@localhost:5432/sermonize
 npm run migrate
-npm run dev &                      # http://127.0.0.1:3000
+npm run dev:api &                  # http://127.0.0.1:3000 (from the repository root)
 
 # Bootstrap an admin with the CLI (writes as the fixed system user).
 ADMIN_ID=$(npm run -s cli -- create-user --kind human --role admin --email admin@example.org)

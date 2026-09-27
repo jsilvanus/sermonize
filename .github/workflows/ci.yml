@@ -30,7 +30,10 @@ jobs:
         with:
           node-version: 22
           cache: npm
+      # One root install for all workspaces (packages/api, packages/mcp).
       - run: npm ci
       - run: npm run typecheck
       - run: npm run build
+      # Workspaces run one after another: the API suite resets the shared test
+      # database's schemas, the MCP suite only adds its own rows to it.
       - run: npm test

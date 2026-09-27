@@ -1,32 +1,26 @@
 {
-  "name": "sermonize",
+  "name": "sermonize-monorepo",
   "version": "0.1.0",
   "private": true,
   "type": "module",
   "engines": {
     "node": ">=22.12"
   },
+  "workspaces": [
+    "packages/*"
+  ],
   "scripts": {
-    "build": "tsc -p tsconfig.build.json",
-    "typecheck": "tsc --noEmit",
-    "dev": "tsx watch src/server.ts",
-    "start": "node dist/server.js",
-    "migrate": "tsx src/cli.ts migrate",
-    "cli": "tsx src/cli.ts",
-    "test": "vitest run"
-  },
-  "dependencies": {
-    "@fastify/swagger": "^9.9.0",
-    "@fastify/swagger-ui": "^6.1.1",
-    "@fastify/type-provider-typebox": "^6.1.0",
-    "fastify": "^5.12.5",
-    "fastify-plugin": "^6.0.0",
-    "pg": "^8.23.0",
-    "typebox": "^1.3.34"
+    "build": "npm run build --workspaces --if-present",
+    "typecheck": "npm run typecheck --workspaces --if-present",
+    "test": "npm test --workspaces --if-present",
+    "dev:api": "npm run dev -w @sermonize/api",
+    "dev:mcp": "npm run dev -w @sermonize/mcp",
+    "migrate": "npm run migrate -w @sermonize/api",
+    "cli": "npm run --silent cli -w @sermonize/api --",
+    "mcp-user": "npm run --silent user -w @sermonize/mcp --"
   },
   "devDependencies": {
     "@types/node": "^22.20.4",
-    "@types/pg": "^8.23.1",
     "tsx": "^4.23.15",
     "typescript": "^7.0.2",
     "vitest": "^5.0.2"
