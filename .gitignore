@@ -3,3 +3,6 @@ dist/
 coverage/
 .env
 *.log
+# MCP server SQLite storage (packages/mcp/data/app.sqlite by default)
+**/data/*.sqlite
+**/data/*.sqlite-*

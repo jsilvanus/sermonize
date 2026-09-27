@@ -1,0 +1,29 @@
+{
+  "name": "@sermonize/mcp",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Thin remote MCP server (Streamable HTTP + OAuth) that relays to the Sermonize REST API.",
+  "engines": {
+    "node": ">=22.12"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc --noEmit && tsc --noEmit -p test",
+    "dev": "tsx watch src/server.ts",
+    "start": "node dist/server.js",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@fastify/formbody": "^9.0.0",
+    "@modelcontextprotocol/sdk": "^1.30.1",
+    "fastify": "^5.12.5",
+    "jose": "^6.2.12",
+    "zod": "^4.6.5"
+  },
+  "devDependencies": {
+    "@sermonize/api": "0.1.0",
+    "@types/pg": "^8.23.1",
+    "pg": "^8.23.0"
+  }
+}

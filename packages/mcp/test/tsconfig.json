@@ -1,0 +1,9 @@
+{
+  // Tests import @sermonize/api from source (the "@sermonize/source" condition) and the MCP SDK's
+  // client transport; neither is written for exactOptionalPropertyTypes, which src/ keeps on.
+  "extends": "../tsconfig.json",
+  "compilerOptions": {
+    "exactOptionalPropertyTypes": false
+  },
+  "include": [".", "../vitest.config.ts"]
+}

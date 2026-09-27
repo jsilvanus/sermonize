@@ -1,0 +1,9 @@
+{
+  // Tests import @sermonize/api from source (the "@sermonize/source" condition), which is not
+  // written for exactOptionalPropertyTypes; src/ keeps it on.
+  "extends": "../tsconfig.json",
+  "compilerOptions": {
+    "exactOptionalPropertyTypes": false
+  },
+  "include": [".", "../vitest.config.ts"]
+}
