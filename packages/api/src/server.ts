@@ -10,6 +10,7 @@ const app = await buildApp({
   maxBatchItems: config.maxBatchItems,
   auth: config.auth,
   trustProxy: config.trustProxy,
+  publicBasePath: config.publicBasePath,
 });
 
 async function shutdown(signal: string): Promise<void> {

@@ -28,6 +28,12 @@ export interface Config {
   maxBatchItems: number;
   /** Fastify `trustProxy` (TRUST_PROXY): false, true, or comma-separated trusted proxy addresses/CIDRs. */
   trustProxy: boolean | string;
+  /**
+   * Path prefix under which a reverse proxy publishes the API (PUBLIC_BASE_PATH, e.g. `/api` when nginx
+   * forwards `/api/*` to the API's root routes), without a trailing slash; '' when served at the root.
+   * Only changes the OpenAPI document's `servers` and the Swagger UI asset URLs, never the routes.
+   */
+  publicBasePath: string;
   auth: AuthConfig;
 }
 
@@ -61,6 +67,18 @@ function trustProxyFromEnv(raw: string | undefined): boolean | string {
   return raw;
 }
 
+/**
+ * PUBLIC_BASE_PATH: unset, '' or '/' -> '' (served at the root); otherwise an absolute path of
+ * unreserved characters (`/api`, `/sermonize/api`), returned without a trailing slash.
+ */
+export function parsePublicBasePath(raw: string | undefined): string {
+  if (raw === undefined || raw === '' || raw === '/') return '';
+  if (!/^(\/[A-Za-z0-9._~-]+)+\/?$/.test(raw) || /(^|\/)\.{1,2}(\/|$)/.test(raw)) {
+    throw new Error(`PUBLIC_BASE_PATH must be an absolute path such as /api (letters, digits, . _ ~ -), got "${raw}"`);
+  }
+  return raw.replace(/\/+$/, '');
+}
+
 export function loadAuthConfig(env: NodeJS.ProcessEnv = process.env): AuthConfig {
   const max = intFromEnv(env, 'AUTH_RATE_LIMIT_MAX', 10, 0);
   return {
@@ -84,6 +102,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     logLevel: env.LOG_LEVEL || 'info',
     maxBatchItems: intFromEnv(env, 'MAX_BATCH_ITEMS', 5000),
     trustProxy: trustProxyFromEnv(env.TRUST_PROXY),
+    publicBasePath: parsePublicBasePath(env.PUBLIC_BASE_PATH),
     auth: loadAuthConfig(env),
   };
 }
