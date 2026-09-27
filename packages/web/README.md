@@ -47,12 +47,14 @@ npm run dev:web             # http://127.0.0.1:3100 (or: npm run build && npm st
 | `WEB_COOKIE_SECRET` | required | signs the session and CSRF cookies; at least 32 characters |
 | `WEB_COOKIE_SECURE` | `true` if `NODE_ENV=production`, else `false` | `Secure` flag on cookies; must be `true` behind HTTPS |
 | `SERMONIZE_REQUEST_TIMEOUT_MS` | `10000` | timeout of one API request |
+| `TRUST_PROXY` | `false` | trusted reverse proxies (`true`, or comma-separated addresses/CIDRs, same as the API); decides the browser IP forwarded to the API |
 | `LOG_LEVEL` | `info` | |
 
 ## Security notes
 
-- **Session:** the cookie `sz_session` holds the user's API token (issued by `POST /auth/login`, named
-  `login`, expiring after the API's `LOGIN_TOKEN_TTL_HOURS`). It is signed (`WEB_COOKIE_SECRET`),
+- **Session:** the cookie `sz_session` holds the user's API token (issued by `POST /auth/login` with
+  `client: "web"`, named `web`, expiring after the API's `LOGIN_TOKEN_TTL_HOURS`). The same account signs in
+  to MCP clients through `@sermonize/mcp`. It is signed (`WEB_COOKIE_SECRET`),
   `HttpOnly`, `SameSite=Lax`, `Path=/`, `Secure` when `WEB_COOKIE_SECURE=true`, and expires with the token.
   Every page resolves it with `GET /me`; a revoked or expired token clears the cookie. Rotating
   `WEB_COOKIE_SECRET` signs everyone out (the API tokens stay valid until they expire).
@@ -65,10 +67,13 @@ npm run dev:web             # http://127.0.0.1:3100 (or: npm run build && npm st
 - **Passwords** are only passed through to the API (argon2id hashing happens there) and are never
   echoed back into a form. Error messages are generic ("Invalid email or password.").
 - **Rate limiting** of register/login is done by the API per client IP. The web app forwards the
-  browser's IP as `X-Forwarded-For`; the API only trusts it when its `TRUST_PROXY` lists the web
-  server's address (e.g. `TRUST_PROXY=127.0.0.1`). Without that, all web users share one bucket.
-  The web app itself does not set `trustProxy`: behind another reverse proxy, `request.ip` is that
-  proxy's address.
+  browser's IP (`request.ip`) as `X-Forwarded-For`; the API only trusts it when its `TRUST_PROXY` lists the
+  web server's address (e.g. `TRUST_PROXY=127.0.0.1`). Without that, all web users share one bucket.
+  Behind a reverse proxy (nginx), set the web app's own `TRUST_PROXY` to that proxy's address, so
+  `request.ip` is the browser's address and not the proxy's.
+- **Shared domain:** the web app's routes (`/`, `/style.css`, `/register`, `/login`, `/logout`, `/account`)
+  do not overlap with the paths a reverse proxy sends to the MCP server (`/mcp`, `/oauth/`,
+  `/.well-known/oauth-*`) or the API (`/api/`).
 - If the API is unreachable (or answers 5xx), pages show a friendly 503 page; details go to the log only.
 
 ## Tests

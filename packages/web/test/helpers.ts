@@ -15,9 +15,12 @@ export interface RunningApi {
 }
 
 /** Starts the real Sermonize API (from source) on an ephemeral port against the test database. */
-export async function startApi(auth: BuildAppOptions['auth'] = {}): Promise<RunningApi> {
+export async function startApi(
+  auth: BuildAppOptions['auth'] = {},
+  trustProxy: BuildAppOptions['trustProxy'] = false,
+): Promise<RunningApi> {
   const pool = new pg.Pool({ connectionString: TEST_DATABASE_URL, max: 5 });
-  const app = await buildApp({ pool, auth });
+  const app = await buildApp({ pool, auth, trustProxy });
   await app.listen({ host: '127.0.0.1', port: 0 });
   const address = app.server.address();
   if (!address || typeof address === 'string') throw new Error('no address');
@@ -40,12 +43,13 @@ export async function apiUser(pool: pg.Pool, role: Role): Promise<{ id: string; 
   });
 }
 
-export function buildWeb(apiUrl: string, opts: { cookieSecure?: boolean } = {}): Promise<WebApp> {
+export function buildWeb(apiUrl: string, opts: { cookieSecure?: boolean; trustProxy?: boolean | string } = {}): Promise<WebApp> {
   return buildWebApp({
     sermonizeApiUrl: apiUrl,
     cookieSecret: randomBytes(32).toString('base64'),
     cookieSecure: opts.cookieSecure ?? false,
     requestTimeoutMs: 5_000,
+    trustProxy: opts.trustProxy ?? false,
   });
 }
 
@@ -54,8 +58,15 @@ export class Browser {
   readonly cookies = new Map<string, string>();
   constructor(private readonly app: WebApp) {}
 
+  /** Extra headers sent with every request (e.g. X-Forwarded-For from a reverse proxy). */
+  headers: Record<string, string> = {};
+
   async request(opts: InjectOptions): Promise<LightMyRequestResponse> {
-    const res = await this.app.inject({ ...opts, cookies: Object.fromEntries(this.cookies) });
+    const res = await this.app.inject({
+      ...opts,
+      headers: { ...this.headers, ...(opts.headers as Record<string, string> | undefined) },
+      cookies: Object.fromEntries(this.cookies),
+    });
     for (const c of res.cookies as { name: string; value: string; expires?: Date; maxAge?: number }[]) {
       const expired = (c.expires && c.expires.getTime() <= Date.now()) || c.maxAge === 0 || c.value === '';
       if (expired) this.cookies.delete(c.name);

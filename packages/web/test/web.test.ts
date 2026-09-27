@@ -3,9 +3,10 @@
  * ephemeral port) and the shared test database. The database is NOT reset here: every test
  * uses unique emails/languages and compares counts with the API's own /stats.
  */
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { CONTENT_SECURITY_POLICY } from '../src/app.js';
+import { parseTrustProxy } from '../src/config.js';
 import { escapeHtml, html } from '../src/html.js';
 import { apiUser, Browser, buildWeb, csrfFromPage, startApi, type RunningApi } from './helpers.js';
 import type { WebApp } from '../src/app.js';
@@ -186,6 +187,10 @@ describe('sessions', () => {
     const token = browser.sessionToken()!;
     expect(token).toMatch(/^sz_/);
     expect(session.value).not.toBe(token); // signed
+    const { rows } = await openApi.pool.query('SELECT name FROM private.api_token WHERE token_sha256 = $1', [
+      createHash('sha256').update(token).digest('hex'),
+    ]);
+    expect(rows).toEqual([{ name: 'web' }]); // POST /auth/login with client 'web'
 
     const me = (await apiJson('/me', token)).body;
     const account = await browser.get('/account');
@@ -271,6 +276,47 @@ describe('sessions', () => {
     await other.get('/login');
     await fresh.get('/login');
     expect((await fresh.post('/login', { email, password: PASSWORD }, other.csrf())).statusCode).toBe(403);
+  });
+});
+
+describe('client IP forwarding (TRUST_PROXY)', () => {
+  it("the API's per-IP login limit sees the browser's IP only when the web app trusts its proxy", async () => {
+    // The API trusts the web app (127.0.0.1) and allows one login attempt per IP and minute.
+    const limited = await startApi({ rateLimit: { max: 1, timeWindowMs: 60_000 } }, '127.0.0.1');
+    const behindProxy = await buildWeb(limited.url, { trustProxy: true });
+    const direct = await buildWeb(limited.url);
+    try {
+      const attempt = async (app: WebApp, ip: string) => {
+        const browser = new Browser(app);
+        browser.headers['x-forwarded-for'] = ip;
+        await browser.get('/login');
+        return (await browser.post('/login', { email: uniqueEmail(), password: 'wrong password' })).statusCode;
+      };
+      expect(await attempt(behindProxy, '198.51.100.1')).toBe(401);
+      expect(await attempt(behindProxy, '198.51.100.2')).toBe(401); // another person: own bucket
+      expect(await attempt(behindProxy, '198.51.100.1')).toBe(429);
+      // Without TRUST_PROXY the header is ignored: everyone is the proxy's (here: inject's) address.
+      expect(await attempt(direct, '198.51.100.3')).toBe(401);
+      expect(await attempt(direct, '198.51.100.4')).toBe(429);
+    } finally {
+      await behindProxy.close();
+      await direct.close();
+      await limited.close();
+    }
+  });
+
+  it('TRUST_PROXY has the API semantics', () => {
+    expect(parseTrustProxy(undefined)).toBe(false);
+    expect(parseTrustProxy('false')).toBe(false);
+    expect(parseTrustProxy('true')).toBe(true);
+    expect(parseTrustProxy('127.0.0.1,10.0.0.0/8')).toBe('127.0.0.1,10.0.0.0/8');
+  });
+
+  it('has no routes under the paths a shared-domain proxy sends elsewhere (/api/, /mcp, /oauth/, /.well-known/)', async () => {
+    const browser = new Browser(web);
+    for (const url of ['/mcp', '/oauth/authorize', '/oauth/token', '/.well-known/oauth-authorization-server', '/.well-known/oauth-protected-resource/mcp', '/api/health', '/api/stats']) {
+      expect((await browser.get(url)).statusCode, url).toBe(404);
+    }
   });
 });
 

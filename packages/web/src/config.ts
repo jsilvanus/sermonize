@@ -9,7 +9,19 @@ export interface WebConfig {
   cookieSecure: boolean;
   /** Timeout of one API request, in milliseconds. */
   requestTimeoutMs: number;
+  /**
+   * Fastify `trustProxy` (TRUST_PROXY): false, true, or comma-separated trusted proxy addresses/CIDRs.
+   * Decides `request.ip`, which is forwarded to the API as X-Forwarded-For on register/login.
+   */
+  trustProxy: boolean | string;
   logLevel: string;
+}
+
+/** Same semantics as the API's TRUST_PROXY: unset/"false" -> false, "true" -> true, else an address list. */
+export function parseTrustProxy(raw: string | undefined): boolean | string {
+  if (raw === undefined || raw === '' || raw === 'false') return false;
+  if (raw === 'true') return true;
+  return raw;
 }
 
 function positiveInt(env: NodeJS.ProcessEnv, name: string, fallback: number): number {
@@ -51,6 +63,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): WebConfig {
     cookieSecret: parseCookieSecret(env.WEB_COOKIE_SECRET),
     cookieSecure: bool(env, 'WEB_COOKIE_SECURE', env.NODE_ENV === 'production'),
     requestTimeoutMs: positiveInt(env, 'SERMONIZE_REQUEST_TIMEOUT_MS', 10_000),
+    trustProxy: parseTrustProxy(env.TRUST_PROXY),
     logLevel: env.LOG_LEVEL || 'info',
   };
 }

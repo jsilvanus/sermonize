@@ -16,7 +16,8 @@ import {
   type RegisterForm,
 } from './views.js';
 
-export type WebAppConfig = Pick<WebConfig, 'sermonizeApiUrl' | 'cookieSecret' | 'cookieSecure' | 'requestTimeoutMs'>;
+export type WebAppConfig = Pick<WebConfig, 'sermonizeApiUrl' | 'cookieSecret' | 'cookieSecure' | 'requestTimeoutMs'> &
+  Partial<Pick<WebConfig, 'trustProxy'>>;
 
 export const SESSION_COOKIE = 'sz_session';
 export const CSRF_COOKIE = 'sz_csrf';
@@ -52,7 +53,8 @@ function safeEqual(a: string, b: string): boolean {
  */
 export async function buildWebApp(config: WebAppConfig, logger: FastifyServerOptions['logger'] = false) {
   const api = new SermonizeApi(config.sermonizeApiUrl, config.requestTimeoutMs);
-  const app = Fastify({ logger, bodyLimit: 16 * 1024 });
+  // trustProxy decides request.ip, the browser address forwarded to the API's per-IP auth rate limit.
+  const app = Fastify({ logger, bodyLimit: 16 * 1024, trustProxy: config.trustProxy ?? false });
 
   await app.register(cookie, { secret: config.cookieSecret });
   await app.register(formbody);

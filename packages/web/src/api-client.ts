@@ -107,7 +107,8 @@ export class SermonizeApi {
     return this.request<{ user_id: string; role: string }>('POST', '/auth/register', { body, clientIp });
   }
   login(body: { email: string; password: string }, clientIp?: string) {
-    return this.request<LoginResult>('POST', '/auth/login', { body, clientIp });
+    // client 'web': the token is named web and lives LOGIN_TOKEN_TTL_HOURS (the API's default client).
+    return this.request<LoginResult>('POST', '/auth/login', { body: { ...body, client: 'web' }, clientIp });
   }
   logout(token: string) {
     return this.request<null>('POST', '/auth/logout', { token });
