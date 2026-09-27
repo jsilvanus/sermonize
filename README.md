@@ -127,6 +127,97 @@ Cluster labels are derived data, not canonical cluster names.
 
 This permits AI-generated labels to be reviewed or replaced by a human without destroying provenance.
 
+
+## Users, access control, and audit metadata
+
+The API is user-controlled. Every mutable/domain record must record who created it and when, and records that can be changed should also record who last changed them and when.
+
+Public/domain tables must **not contain personally identifiable information (PII)**. They refer to users only through a stable pseudonymized user identifier.
+
+### User identity
+
+Use two separate concepts:
+
+- **user identity / authentication**: handled by the authentication layer
+- **domain user reference**: a pseudonymized, non-PII identifier stored in the database
+
+A single dedicated PII table is the only place where account-level PII is stored.
+
+### Users
+
+Domain-facing user record:
+
+- id
+- user_hash (stable pseudonymized identifier)
+- role
+- status
+- created_at
+- updated_at
+
+The application must never expose the PII record through ordinary domain endpoints.
+
+### User PII
+
+One isolated table contains account PII:
+
+- user_id
+- email / login identifier as required
+- display_name where required
+- other strictly necessary PII
+- created_at
+- updated_at
+
+Keep this table behind stricter database/API permissions than ordinary corpus data. Do not duplicate PII into authors, works, texts, chunks, embeddings, clusters, labels, or audit fields.
+
+### Audit fields
+
+Domain records should use:
+
+- created_by_user_id
+- created_at
+- updated_by_user_id
+- updated_at
+
+For immutable records, at minimum:
+
+- created_by_user_id
+- created_at
+
+For operations where historical accountability matters, retain an append-only audit trail rather than relying only on current `updated_by` values.
+
+### Authorization
+
+The API must enforce authorization server-side. User identity is never trusted merely because a caller supplies a `user_id` in request data.
+
+The authenticated principal determines `created_by_user_id`, `updated_by_user_id`, and authorization decisions.
+
+Roles/permissions should be explicit and least-privilege. At minimum distinguish ordinary users from administrators/research-data managers.
+
+### Pseudonymization
+
+The pseudonymized identifier must be stable and non-reversible from the domain API. Do not use email addresses, names, or other PII as foreign keys in corpus tables.
+
+If a deterministic hash is used, use a server-side secret/keyed construction rather than an unsalted plain hash of an email address or other identifier.
+
+### Privacy boundary
+
+The intended boundary is:
+
+    authenticated principal
+            |
+            v
+       authorization
+            |
+            v
+    pseudonymous user id
+            |
+            v
+    domain/corpus tables
+
+    PII <---- isolated user-PII table
+
+No domain endpoint should need to return PII to perform ordinary corpus operations.
+
 ## Provenance
 
 Derived data must retain enough information to answer:
