@@ -5,7 +5,8 @@ import { migrate } from './db/migrate.js';
 import { createPool } from './db/pool.js';
 import { withTransaction } from './db/transaction.js';
 import { ROLES, SYSTEM_PRINCIPAL, USER_KINDS, type Role, type UserKind } from './lib/principal.js';
-import { createUser, getUser, issueToken, revokeToken } from './lib/users.js';
+import { hashPassword, PASSWORD_MAX_LENGTH, PASSWORD_MIN_LENGTH, passwordLength } from './lib/passwords.js';
+import { createUser, getUser, issueToken, revokeToken, setUserPassword } from './lib/users.js';
 import { createVectorIndex, dropVectorIndex } from './lib/vector-index.js';
 
 const USAGE = `Usage: npm run cli -- <command> [options]
@@ -14,6 +15,8 @@ Commands:
   migrate                                           apply pending migrations
   create-user --kind human|service --role <role>    create a user, prints its id
               [--email <email>] [--display-name <name>]
+              [--password-stdin]                    also set a password, read from stdin
+                                                    (human users with --email only; 12-256 chars)
   create-token --user <id> --name <name>            issue an API token, prints it once
               [--expires-at <ISO timestamp>]
   revoke-token <token-id>                           revoke an API token
@@ -21,7 +24,21 @@ Commands:
                                                     (CREATE INDEX CONCURRENTLY; ≤ 4000 dimensions)
   drop-index <embedding-space-id>                   drop the space's HNSW index (CONCURRENTLY)
 
-Roles: ${ROLES.join(', ')}. All writes run as the system user ${SYSTEM_PRINCIPAL.userId}.`;
+Roles: ${ROLES.join(', ')}. All writes run as the system user ${SYSTEM_PRINCIPAL.userId}.
+
+This CLI talks to the database directly and is meant for bootstrap and operations
+(migrations, the first admin, vector indexes). Day-to-day user management goes
+through the API with \`sermonize-admin\` (packages/cli), e.g. after
+  printf '%s\n' "$PASSWORD" | npm run cli -- create-user --kind human --role admin --email you@example.org --password-stdin
+  sermonize-admin login --email you@example.org`;
+
+/** Reads all of stdin and strips one trailing newline (the password itself may contain spaces). */
+async function readStdinSecret(): Promise<string> {
+  if (process.stdin.isTTY) fail('--password-stdin expects the password on a pipe, e.g. printf \'%s\\n\' "$PW" | ...');
+  const chunks: Buffer[] = [];
+  for await (const chunk of process.stdin) chunks.push(chunk as Buffer);
+  return Buffer.concat(chunks).toString('utf8').replace(/\r?\n$/, '');
+}
 
 function fail(message: string): never {
   console.error(`${message}\n\n${USAGE}`);
@@ -45,6 +62,7 @@ async function main(argv: string[]): Promise<void> {
       user: { type: 'string' },
       name: { type: 'string' },
       'expires-at': { type: 'string' },
+      'password-stdin': { type: 'boolean' },
     },
   });
 
@@ -65,9 +83,22 @@ async function main(argv: string[]): Promise<void> {
         const role = values.role as Role | undefined;
         if (!kind || !USER_KINDS.includes(kind)) fail('--kind must be human or service');
         if (!role || !ROLES.includes(role)) fail(`--role must be one of ${ROLES.join(', ')}`);
-        const user = await asSystem((c) =>
-          createUser(c, { kind, role, email: values.email, displayName: values['display-name'] }),
-        );
+        let passwordHash: string | undefined;
+        if (values['password-stdin']) {
+          if (kind !== 'human') fail('only human users can have a password');
+          if (!values.email) fail('--password-stdin needs --email (the password signs in with it)');
+          const password = await readStdinSecret();
+          const length = passwordLength(password);
+          if (length < PASSWORD_MIN_LENGTH || length > PASSWORD_MAX_LENGTH) {
+            fail(`password must be ${PASSWORD_MIN_LENGTH} to ${PASSWORD_MAX_LENGTH} characters long`);
+          }
+          passwordHash = await hashPassword(password);
+        }
+        const user = await asSystem(async (c) => {
+          const created = await createUser(c, { kind, role, email: values.email, displayName: values['display-name'] });
+          if (passwordHash) await setUserPassword(c, { userId: created.id, passwordHash });
+          return created;
+        });
         console.log(user.id);
         break;
       }

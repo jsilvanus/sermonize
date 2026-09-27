@@ -52,5 +52,10 @@ GRANT EXECUTE ON FUNCTION
   private.register_user(text, text, text, text),
   private.get_password_credential(text),
   private.create_login_token(uuid, text, timestamptz, text), -- signature since 0004_login_token_client
-  private.revoke_own_token(text)
+  private.revoke_own_token(text),
+  -- 0005_admin_user_management: admin user listing, PII updates, passwords (admin principal required)
+  private.admin_list_users(uuid, text, text, text, text, timestamptz, uuid, integer),
+  private.admin_list_tokens(uuid),
+  private.admin_update_user_pii(uuid, boolean, text, boolean, text),
+  private.admin_set_password(uuid, text, boolean)
 TO sermonize_app;

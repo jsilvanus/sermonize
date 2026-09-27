@@ -193,7 +193,7 @@ describe('password accounts', () => {
       const web = await api(open.app, null, { method: 'POST', url: '/auth/login', payload: { email, password: PASSWORD, client: 'web' } });
       expect(web.statusCode).toBe(200);
       expect(Math.abs(Date.parse(web.json().expires_at) - (Date.now() + 12 * 3_600_000))).toBeLessThan(5000);
-      const bad = await api(open.app, null, { method: 'POST', url: '/auth/login', payload: { email, password: PASSWORD, client: 'cli' } });
+      const bad = await api(open.app, null, { method: 'POST', url: '/auth/login', payload: { email, password: PASSWORD, client: 'admin' } });
       expect(bad.statusCode).toBe(400);
       expect(bad.json().error.code).toBe('validation_failed');
     });
@@ -208,6 +208,25 @@ describe('password accounts', () => {
         };
         expect(Math.abs((await ttl('web')) - 3_600_000)).toBeLessThan(5000);
         expect(Math.abs((await ttl('mcp')) - 3 * 3_600_000)).toBeLessThan(5000);
+      } finally {
+        await ctx.close();
+      }
+    });
+
+    it("client 'cli' (sermonize-admin) gets a token named cli with CLI_LOGIN_TOKEN_TTL_HOURS (default 12)", async () => {
+      expect(loadAuthConfig({}).cliLoginTokenTtlHours).toBe(12);
+      expect(loadAuthConfig({ CLI_LOGIN_TOKEN_TTL_HOURS: '5' }).cliLoginTokenTtlHours).toBe(5);
+      expect(() => loadAuthConfig({ CLI_LOGIN_TOKEN_TTL_HOURS: '0' })).toThrow(/CLI_LOGIN_TOKEN_TTL_HOURS/);
+      const ctx = await setupTestApp({ auth: { cliLoginTokenTtlHours: 2 } });
+      try {
+        const { email, user_id } = await registered();
+        const res = await api(ctx.app, null, { method: 'POST', url: '/auth/login', payload: { email, password: PASSWORD, client: 'cli' } });
+        expect(res.statusCode, res.body).toBe(200);
+        expect(Math.abs(Date.parse(res.json().expires_at) - (Date.now() + 2 * 3_600_000))).toBeLessThan(5000);
+        const { rows } = await ctx.pool.query('SELECT name FROM private.api_token WHERE token_sha256 = $1', [hashToken(res.json().token)]);
+        expect(rows[0].name).toBe('cli');
+        const audit = await ctx.pool.query(`SELECT changes FROM audit_event WHERE action = 'token_create' AND actor_id = $1`, [user_id]);
+        expect(audit.rows.map((r) => r.changes)).toEqual([expect.objectContaining({ via: 'login', client: 'cli' })]);
       } finally {
         await ctx.close();
       }

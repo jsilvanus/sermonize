@@ -14,6 +14,8 @@ export interface AuthConfig {
   loginTokenTtlHours: number;
   /** Lifetime of tokens issued by POST /auth/login for the MCP server (`client: 'mcp'`), in hours. */
   mcpLoginTokenTtlHours: number;
+  /** Lifetime of tokens issued by POST /auth/login for `sermonize-admin login` (`client: 'cli'`), in hours. */
+  cliLoginTokenTtlHours: number;
   /** Per-IP limit on POST /auth/register and /auth/login; null disables it. */
   rateLimit: { max: number; timeWindowMs: number } | null;
 }
@@ -66,6 +68,7 @@ export function loadAuthConfig(env: NodeJS.ProcessEnv = process.env): AuthConfig
     registrationDefaultRole: parseRegistrationRole(env.REGISTRATION_DEFAULT_ROLE),
     loginTokenTtlHours: intFromEnv(env, 'LOGIN_TOKEN_TTL_HOURS', 12),
     mcpLoginTokenTtlHours: intFromEnv(env, 'MCP_LOGIN_TOKEN_TTL_HOURS', 720),
+    cliLoginTokenTtlHours: intFromEnv(env, 'CLI_LOGIN_TOKEN_TTL_HOURS', 12),
     rateLimit:
       max === 0 ? null : { max, timeWindowMs: intFromEnv(env, 'AUTH_RATE_LIMIT_WINDOW_SECONDS', 60) * 1000 },
   };

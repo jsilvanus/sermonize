@@ -2,13 +2,13 @@ import { Type, type FastifyPluginAsyncTypebox } from '@fastify/type-provider-typ
 import pg from 'pg';
 import type { AuthConfig } from '../config.js';
 import { withTransaction } from '../db/transaction.js';
-import { ApiError, badRequest, conflict, unauthorized } from '../lib/errors.js';
+import { ApiError, conflict, unauthorized } from '../lib/errors.js';
 import {
   dummyVerify,
+  checkPasswordLength,
   hashPassword,
   PASSWORD_MAX_LENGTH,
   PASSWORD_MIN_LENGTH,
-  passwordLength,
   verifyPassword,
 } from '../lib/passwords.js';
 import type { Role, UserKind } from '../lib/principal.js';
@@ -29,18 +29,18 @@ const RegisterBody = Type.Object({
 });
 
 /** Which client asks for the login token: its name and lifetime depend on it. */
-export type LoginClient = 'web' | 'mcp';
+export type LoginClient = 'web' | 'mcp' | 'cli';
 
 const LoginBody = Type.Object({
   email: Type.String({ minLength: 1, maxLength: 320 }),
   password: Password,
   client: Type.Optional(
     Type.Union(
-      [Type.Literal('web'), Type.Literal('mcp')],
+      [Type.Literal('web'), Type.Literal('mcp'), Type.Literal('cli')],
       {
         description:
           "Who asks for the token (default 'web'). The token is named after it and expires after " +
-          'LOGIN_TOKEN_TTL_HOURS (web) or MCP_LOGIN_TOKEN_TTL_HOURS (mcp).',
+          'LOGIN_TOKEN_TTL_HOURS (web), MCP_LOGIN_TOKEN_TTL_HOURS (mcp) or CLI_LOGIN_TOKEN_TTL_HOURS (cli, sermonize-admin).',
       },
     ),
   ),
@@ -52,7 +52,7 @@ const authErrors = { ...errorResponses, 429: ErrorResponse };
  * Self-service password accounts (migration 0003):
  *   GET  /auth/config    public: whether registration is open, password rules
  *   POST /auth/register  public, REGISTRATION_OPEN only: creates a human user with REGISTRATION_DEFAULT_ROLE
- *   POST /auth/login     public: email + password (+ client web|mcp) -> expiring API token named after the client
+ *   POST /auth/login     public: email + password (+ client web|mcp|cli) -> expiring API token named after the client
  *   POST /auth/logout    authenticated: revokes the token used for the request
  * PII (email, display name) and the password hash stay in the private schema.
  */
@@ -94,10 +94,7 @@ export const authRoutes: FastifyPluginAsyncTypebox<{ auth: AuthConfig }> = async
       if (!auth.registrationOpen) throw new ApiError(403, 'registration_closed', 'self-registration is closed');
       const { password, display_name } = request.body;
       const email = request.body.email.trim();
-      const length = passwordLength(password);
-      if (length < PASSWORD_MIN_LENGTH || length > PASSWORD_MAX_LENGTH) {
-        throw badRequest(`password must be ${PASSWORD_MIN_LENGTH} to ${PASSWORD_MAX_LENGTH} characters long`);
-      }
+      checkPasswordLength(password);
       const passwordHash = await hashPassword(password);
       const role = auth.registrationDefaultRole;
       let userId: string;
@@ -157,7 +154,8 @@ export const authRoutes: FastifyPluginAsyncTypebox<{ auth: AuthConfig }> = async
       if (!ok || cred.status !== 'active') throw invalidCredentials();
 
       const token = generateToken();
-      const ttlHours = client === 'mcp' ? auth.mcpLoginTokenTtlHours : auth.loginTokenTtlHours;
+      const ttlHours =
+        client === 'mcp' ? auth.mcpLoginTokenTtlHours : client === 'cli' ? auth.cliLoginTokenTtlHours : auth.loginTokenTtlHours;
       const expiresAt = new Date(Date.now() + ttlHours * 3_600_000);
       try {
         await withTransaction(app.pg, null, request.id, (db) =>

@@ -1,4 +1,5 @@
 import { hash, verify } from '@node-rs/argon2';
+import { badRequest } from './errors.js';
 
 /** Password length limits in Unicode code points (checked by POST /auth/register). */
 export const PASSWORD_MIN_LENGTH = 12;
@@ -36,4 +37,12 @@ export function passwordLength(password: string): number {
   let n = 0;
   for (const _ of password) n++;
   return n;
+}
+
+/** Enforces the registration length rule (400 otherwise); used for every password the API accepts. */
+export function checkPasswordLength(password: string): void {
+  const length = passwordLength(password);
+  if (length < PASSWORD_MIN_LENGTH || length > PASSWORD_MAX_LENGTH) {
+    throw badRequest(`password must be ${PASSWORD_MIN_LENGTH} to ${PASSWORD_MAX_LENGTH} characters long`);
+  }
 }

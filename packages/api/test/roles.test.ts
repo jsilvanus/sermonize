@@ -6,7 +6,7 @@ import { readFile } from 'node:fs/promises';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { Pool, PoolClient } from 'pg';
 import { hashToken } from '../src/lib/tokens.js';
-import { createTestPool, createUser, expectPgError, type TestUser } from './helpers.js';
+import { createTestPool, createUser, expectPgError, SYSTEM_PRINCIPAL, type TestUser } from './helpers.js';
 
 describe('sql/roles.sql (sermonize_app)', () => {
   let pool: Pool;
@@ -82,6 +82,32 @@ describe('sql/roles.sql (sermonize_app)', () => {
     try {
       await client.query(`SELECT set_config('app.user_id', $1, true)`, [user.id]);
       await expectPgError(client.query(`SELECT private.set_user_pii($1, 'a@b.c', null)`, [user.id]), '42501');
+    } finally {
+      await client.query('ROLLBACK');
+    }
+  });
+
+  it('can call the 0005 admin functions, which require an active admin principal', async () => {
+    const calls = [
+      'SELECT * FROM private.admin_list_users(null, null, null, null, null, null, null, 10)',
+      `SELECT * FROM private.admin_list_tokens('${user.id}')`,
+      `SELECT private.admin_update_user_pii('${user.id}', true, 'x@example.org', false, null)`,
+      `SELECT private.admin_set_password('${user.id}', '$argon2id$v=19$x', false)`,
+    ];
+    for (const sql of calls) {
+      await client.query('BEGIN');
+      try {
+        await client.query(`SELECT set_config('app.user_id', $1, true)`, [user.id]);
+        await expectPgError(client.query(sql), '42501');
+      } finally {
+        await client.query('ROLLBACK');
+      }
+    }
+    await client.query('BEGIN');
+    try {
+      await client.query(`SELECT set_config('app.user_id', $1, true)`, [SYSTEM_PRINCIPAL.userId]);
+      const { rows } = await client.query('SELECT id, email, has_password FROM private.admin_list_users($1, null, null, null, null, null, null, 10)', [user.id]);
+      expect(rows).toEqual([{ id: user.id, email: null, has_password: false }]);
     } finally {
       await client.query('ROLLBACK');
     }

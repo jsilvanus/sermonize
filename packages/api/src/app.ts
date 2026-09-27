@@ -24,8 +24,8 @@ export interface BuildAppOptions {
   /** Maximum items per batch request (MAX_BATCH_ITEMS); default 5000. */
   maxBatchItems?: number;
   /**
-   * Registration/login settings. Defaults: registration closed, role reader, 12 h web and
-   * 720 h (30 days) MCP login tokens, no rate limit (the server passes the env-based config, see config.ts).
+   * Registration/login settings. Defaults: registration closed, role reader, 12 h web,
+   * 720 h (30 days) MCP and 12 h CLI login tokens, no rate limit (the server passes the env-based config, see config.ts).
    */
   auth?: Partial<AuthConfig>;
   /** Fastify `trustProxy` (TRUST_PROXY); decides `request.ip` for the auth rate limit. */
@@ -37,6 +37,7 @@ const DEFAULT_AUTH: AuthConfig = {
   registrationDefaultRole: 'reader',
   loginTokenTtlHours: 12,
   mcpLoginTokenTtlHours: 720,
+  cliLoginTokenTtlHours: 12,
   rateLimit: null,
 };
 
@@ -44,7 +45,7 @@ export async function buildApp({ pool, logger = false, maxBatchItems = 5000, aut
   const authConfig: AuthConfig = { ...DEFAULT_AUTH, ...auth };
   // Fail at startup, not at the first registration.
   parseRegistrationRole(authConfig.registrationDefaultRole);
-  for (const key of ['loginTokenTtlHours', 'mcpLoginTokenTtlHours'] as const) {
+  for (const key of ['loginTokenTtlHours', 'mcpLoginTokenTtlHours', 'cliLoginTokenTtlHours'] as const) {
     if (!Number.isInteger(authConfig[key]) || !(authConfig[key] > 0)) throw new Error(`${key} must be a positive integer`);
   }
 

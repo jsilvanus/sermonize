@@ -91,3 +91,126 @@ export async function revokeToken(client: PoolClient, tokenId: string): Promise<
   const { rows } = await client.query<{ ok: boolean }>('SELECT private.revoke_api_token($1) AS ok', [tokenId]);
   return rows[0]!.ok;
 }
+
+/**
+ * Stores an argon2id hash (hashed in Node) as the user's password via
+ * private.admin_set_password (human users with an email only; SZ004 otherwise).
+ * Optionally revokes all of the user's tokens; returns how many were revoked.
+ * Must run inside withTransaction() as an admin principal.
+ */
+export async function setUserPassword(
+  client: PoolClient,
+  input: { userId: string; passwordHash: string; revokeTokens?: boolean },
+): Promise<number> {
+  const { rows } = await client.query<{ revoked: number }>(
+    'SELECT private.admin_set_password($1, $2, $3) AS revoked',
+    [input.userId, input.passwordHash, input.revokeTokens ?? false],
+  );
+  return rows[0]!.revoked;
+}
+
+/** Admin view of a user, including PII (admins manage accounts). Never includes password hashes. */
+export interface AdminUser {
+  id: string;
+  kind: UserKind;
+  role: Role;
+  status: 'active' | 'disabled';
+  email: string | null;
+  display_name: string | null;
+  has_password: boolean;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface AdminUserFilters {
+  id?: string;
+  role?: Role;
+  status?: 'active' | 'disabled';
+  kind?: UserKind;
+  /** ILIKE pattern (already escaped). */
+  qPattern?: string;
+  after?: { createdAt: string; id: string };
+  limit: number;
+}
+
+/**
+ * Lists users with PII through private.admin_list_users (which audits the read).
+ * Ordered by (created_at, id); `sortKey` is the keyset cursor key of each row.
+ */
+export async function listAdminUsers(
+  client: PoolClient,
+  f: AdminUserFilters,
+): Promise<Array<AdminUser & { sortKey: string }>> {
+  const { rows } = await client.query<
+    Omit<AdminUser, 'created_at' | 'updated_at'> & { created_at: Date; updated_at: Date; sort_created_at: string }
+  >('SELECT * FROM private.admin_list_users($1, $2, $3, $4, $5, $6, $7, $8)', [
+    f.id ?? null,
+    f.role ?? null,
+    f.status ?? null,
+    f.kind ?? null,
+    f.qPattern ?? null,
+    f.after?.createdAt ?? null,
+    f.after?.id ?? null,
+    f.limit,
+  ]);
+  return rows.map((r) => ({
+    id: r.id,
+    kind: r.kind,
+    role: r.role,
+    status: r.status,
+    email: r.email,
+    display_name: r.display_name,
+    has_password: r.has_password,
+    created_at: r.created_at.toISOString(),
+    updated_at: r.updated_at.toISOString(),
+    sortKey: `${r.sort_created_at}|${r.id}`,
+  }));
+}
+
+export interface TokenInfo {
+  id: string;
+  name: string;
+  created_by: string;
+  created_at: string;
+  expires_at: string | null;
+  revoked_at: string | null;
+  /** active | expired | revoked (derived). */
+  state: 'active' | 'expired' | 'revoked';
+}
+
+/** Token metadata of a user (never the hash). Must run as an admin principal. */
+export async function listUserTokens(client: PoolClient, userId: string): Promise<TokenInfo[]> {
+  const { rows } = await client.query<{
+    id: string;
+    name: string;
+    created_by: string;
+    created_at: Date;
+    expires_at: Date | null;
+    revoked_at: Date | null;
+  }>('SELECT * FROM private.admin_list_tokens($1)', [userId]);
+  const now = Date.now();
+  return rows.map((r) => ({
+    id: r.id,
+    name: r.name,
+    created_by: r.created_by,
+    created_at: r.created_at.toISOString(),
+    expires_at: r.expires_at?.toISOString() ?? null,
+    revoked_at: r.revoked_at?.toISOString() ?? null,
+    state: r.revoked_at ? 'revoked' : r.expires_at && r.expires_at.getTime() <= now ? 'expired' : 'active',
+  }));
+}
+
+/** Partial PII update (only the given fields; null clears). Must run as an admin principal. */
+export async function updateUserPii(
+  client: PoolClient,
+  userId: string,
+  pii: { email?: string | null; displayName?: string | null },
+): Promise<void> {
+  await client.query('SELECT private.admin_update_user_pii($1, $2, $3, $4, $5)', [
+    userId,
+    pii.email !== undefined,
+    pii.email ?? null,
+    pii.displayName !== undefined,
+    pii.displayName ?? null,
+  ]);
+}
