@@ -16,8 +16,18 @@ Validation of content, permissions, visibility of restricted texts and audit all
 Built from the Codestash scaffold `codestash/mcp/api-connector-style` (Streamable HTTP, embedded
 OAuth authorization server with CIMD + PKCE, SQLite storage). [`LEARNED.md`](LEARNED.md) is that
 scaffold's file, copied unchanged: read it before touching the OAuth plumbing (`src/oauth/`,
-`src/auth.ts`, `src/oauth-metadata.ts`, `src/csp.ts`, `src/mcp/http.ts`), which is kept as in the
-scaffold apart from passing the Sermonize client and token store through.
+`src/auth.ts`, `src/oauth-metadata.ts`, `src/csp.ts`, `src/mcp/http.ts`). Sermonize changes to it:
+the scaffold's demo user store is replaced by sign-in through the Sermonize API, and codes, refresh
+tokens and access tokens belong to an OAuth *grant* that holds the upstream API token.
+
+## Accounts: one Sermonize login
+
+There are no MCP-specific users or passwords. People sign in on the MCP sign-in page with their
+**Sermonize account** (the same email and password as in `@sermonize/web`; accounts are created by
+self-registration on the web UI or by an admin through the API). The MCP server never stores or hashes
+passwords: it passes them to the API's `POST /auth/login` with `client: "mcp"` and keeps the API token
+it gets back, encrypted, for that OAuth grant. The OAuth subject (`sub`) is the Sermonize user id, and
+every tool call runs with the user's own role, restrictions and audit identity.
 
 ## Architecture
 
@@ -36,30 +46,87 @@ scaffold apart from passing the Sermonize client and token store through.
 | /mcp            verify JWT         |
 |    |            (sig, iss, aud)    |
 |    v                               |
-| MCP user = JWT sub                 |
+| grant = JWT sid (must be active),  |
+| user  = JWT sub (Sermonize id)     |
 |    |                               |
 |    v                               |
-| SQLite: sub -> Sermonize token     |
-|   (AES-256-GCM encrypted)          |
+| SQLite: grant -> API token         |
+|   (AES-256-GCM, grant id as AAD)   |
 |    |                               |
 |    v                               |
 | connector.ts (fetch + timeout)     |
 +----|-------------------------------+
      |
-     | HTTP, Bearer <this user's
+     | HTTP, Bearer <the grant's
      |       Sermonize API token>
      v
 +------------------------------------+
 | @sermonize/api (port 3000)         |
-| roles, validation, audit           |
+| users, roles, validation, audit    |
 +----|-------------------------------+
      v
  PostgreSQL + pgvector
 ```
 
+### Sign-in flow
+
+```
+MCP client     browser         MCP server             Sermonize API
+    |             |                 |                        |
+    |-- open /oauth/authorize ----->|                        |
+    |   (client_id=CIMD URL,        | fetch + check CIMD     |
+    |    PKCE S256, resource)       | document, redirect_uri |
+    |             |<-- sign-in page-|                        |
+    |             |-- email, pw --->|                        |
+    |             |                 |-- POST /auth/login --->|
+    |             |                 |   {email, password,    |
+    |             |                 |    client:"mcp"}       |
+    |             |                 |   X-Forwarded-For: ip  |
+    |             |                 |<-- token, expires_at,--|
+    |             |                 |    user_id, role       |
+    |             |                 | new pending grant:     |
+    |             |                 |  sub=user_id,          |
+    |             |                 |  token encrypted       |
+    |             |<- consent page -|  (+ one-time ticket)   |
+    |             |-- approve ----->|                        |
+    |             |                 | grant active;          |
+    |<-- redirect ?code=&state=&iss-|  code -> grant         |
+    |                               |                        |
+    |-- POST /oauth/token --------->|                        |
+    |   code + code_verifier        | check PKCE, grant      |
+    |<-- access JWT (sub, sid) -----|                        |
+    |    + refresh token            |                        |
+    |                               |                        |
+    |-- POST /mcp tools/call ------>|                        |
+    |   Bearer <JWT>                | sid -> API token       |
+    |                               |-- GET /me etc. ------->|
+    |                               |   Bearer <API token>   |
+    |<-- tool result ---------------|<-----------------------|
+```
+
+- **Wrong credentials** (unknown email, wrong password, disabled account): the sign-in page again with
+  the generic *"Invalid email or password."* (HTTP 401). The API's 429 becomes *"Too many sign-in
+  attempts ..."* (429); an unreachable API (or 5xx) *"Sermonize cannot be reached right now ..."* (503).
+- **Deny** at the consent step: redirect with `error=access_denied`; the API token is revoked at once.
+- **Lifetimes.** Access tokens: 1 hour, never past the API token's `expires_at`. Refresh tokens:
+  30 days, capped at the API token's `expires_at` (the API's `MCP_LOGIN_TOKEN_TTL_HOURS`, default
+  720 h = 30 days). A signed-in user has 10 minutes to approve; an approved code must be exchanged
+  within 60 seconds.
+- **The grant ends** when its refresh token expires, when a sign-in is never approved, when consent is
+  denied, or when the API answers 401 for its token (expired, revoked, account disabled). The grant,
+  its codes and refresh tokens are then deleted; access tokens carrying its `sid` are answered with
+  HTTP 401 + `WWW-Authenticate: ... error="invalid_token"`, the refresh token with `invalid_grant`,
+  so the client re-authorizes. The tool call that hit the upstream 401 returns *"Your Sermonize
+  sign-in has expired or was revoked ... Please sign in again ..."* with the `mcp/www_authenticate`
+  hint. For grants that end while the API token may still be valid (expired refresh token, never
+  approved, denied), the server also calls `POST /auth/logout` with that token (best-effort). Ended
+  grants are swept every 10 minutes, and noticed at refresh time.
+- There is no token revocation endpoint (RFC 7009) and no refresh-token rotation yet, as in the scaffold.
+
 ## Setup
 
-Requirements: Node.js >= 22.12 (uses `node:sqlite`), a running Sermonize API.
+Requirements: Node.js >= 22.12 (uses `node:sqlite`), a running Sermonize API, and a Sermonize account
+with a password (register on the web UI, or have an admin create one).
 
 ```sh
 # from the repository root
@@ -69,8 +136,7 @@ set -a; . packages/mcp/.env; set +a
 
 # Secrets
 export JWT_SECRET=$(openssl rand -base64 32)             # signs MCP access tokens
-export SERMONIZE_TOKEN_KEY=$(openssl rand -base64 32)    # encrypts stored Sermonize API tokens
-export MCP_DEFAULT_USER_PASSWORD='change-me'
+export SERMONIZE_TOKEN_KEY=$(openssl rand -base64 32)    # encrypts the per-grant Sermonize API tokens
 export SERMONIZE_API_URL=http://127.0.0.1:3000
 
 npm run dev:mcp            # or: npm run build && npm start -w @sermonize/mcp
@@ -80,49 +146,56 @@ Environment:
 
 | variable | default | |
 |---|---|---|
-| `PORT` / `HOST` | `5999` / `127.0.0.1` | the API uses 3000 |
-| `MCP_PUBLIC_URL` | `http://localhost:$PORT` | public origin; OAuth issuer, MCP resource is `<url>/mcp` |
+| `PORT` / `HOST` | `5999` / `127.0.0.1` | the API uses 3000, the web UI 3100 |
+| `MCP_PUBLIC_URL` | `http://localhost:$PORT` | public **origin** (no path); OAuth issuer; the MCP resource is `<url>/mcp` |
+| `TRUST_PROXY` | `false` | trusted reverse proxies (`true`, or comma-separated addresses/CIDRs, same as the API); decides the end-user IP forwarded to the API at sign-in |
 | `JWT_SECRET` | required | base64, >= 32 bytes |
-| `STORAGE_PATH` | `./data/app.sqlite` | OAuth codes, refresh tokens, MCP users, encrypted API tokens |
-| `MCP_DEFAULT_USER_ID` / `_EMAIL` / `_PASSWORD` | `demo-user` / `demo@example.com` / required | account created on first start (without an API token) |
-| `SERMONIZE_API_URL` | required | base URL of the REST API |
+| `STORAGE_PATH` | `./data/app.sqlite` | OAuth grants (with encrypted API tokens), authorization codes, refresh tokens |
+| `SERMONIZE_API_URL` | required | base URL of the REST API (sign-in and tools) |
 | `SERMONIZE_TOKEN_KEY` | required | base64 of exactly 32 bytes (AES-256-GCM key) |
 | `SERMONIZE_REQUEST_TIMEOUT_MS` | `15000` | timeout of one upstream request |
 | `LOG_LEVEL` | `info` | |
 
-### Users and their Sermonize tokens
+On the **API** side: `MCP_LOGIN_TOKEN_TTL_HOURS` (default 720) sets how long an MCP sign-in lasts, and
+the API's `TRUST_PROXY` must list this server's address, or every MCP sign-in shares one rate-limit bucket.
 
-Every MCP user must be linked to **their own** Sermonize API token. Create the Sermonize user and
-token with the API's admin CLI or admin API, then store the token with the MCP user:
+Removed (earlier versions): `MCP_DEFAULT_USER_ID`, `MCP_DEFAULT_USER_EMAIL`, `MCP_DEFAULT_USER_PASSWORD`
+and the `mcp-user` CLI (`npm run mcp-user`, with `--api-token` linking). Users and their roles are managed
+in the API only.
 
-```sh
-# 1. Sermonize side (API admin CLI): a user with the role this person should have
-SMZ_USER=$(npm run -s cli -- create-user --kind human --role contributor)
-TOKEN=$(npm run -s cli -- create-token --user "$SMZ_USER" --name mcp)
+### Same domain as the web UI
 
-# 2. MCP side: the OAuth login, linked to that token (read from stdin, so it stays out of shell history)
-printf '%s' "$TOKEN" | npm run -s mcp-user -- create --name "Anna" --email anna@example.org \
-  --password 'change-me' --api-token-stdin
+The server can share one public origin with the web UI and the API, e.g. `MCP_PUBLIC_URL=https://example.org`:
+the resource is `https://example.org/mcp`, the issuer `https://example.org`. All its routes are root paths that
+the web UI does not use, so a reverse proxy routes by prefix:
 
-# Link or replace later; unlink
-printf '%s' "$TOKEN" | npm run -s mcp-user -- update <mcp-user-id> --api-token-stdin
-npm run -s mcp-user -- update <mcp-user-id> --clear-api-token
-npm run -s mcp-user -- list          # shows has_api_token, never the token or password hash
-```
+| path | to |
+|---|---|
+| `/mcp` | MCP server |
+| `/oauth/` (`/oauth/authorize`, `/oauth/token`) | MCP server |
+| `/.well-known/oauth-protected-resource`, `/.well-known/oauth-protected-resource/mcp`, `/.well-known/oauth-authorization-server`, `/.well-known/openid-configuration` | MCP server |
+| `/api/` (prefix stripped) | API |
+| everything else | web UI |
 
-`--api-token <token>` also works but leaves the token in shell history and the process list.
-Writing a token needs `SERMONIZE_TOKEN_KEY` (the same key as the server). A user without a token
-can sign in, but every tool returns: *"Your MCP account is not linked to a Sermonize API token ..."*.
+`/health` is also served, for the container health check (not needed publicly). The sign-in form posts to
+the relative `/oauth/authorize`, and the CSP `form-action` is `'self'` plus the OAuth client's redirect origin
+(see `LEARNED.md`).
 
-Revoking the Sermonize token (`npm run cli -- revoke-token <id>`) cuts the MCP user off at once:
-tools then return the API's 401 with an explanation.
+### Upgrading an existing SQLite file
+
+The schema version is kept in `PRAGMA user_version`. A file from before sign-in through the API (version 0)
+is upgraded on start by **dropping** its old tables (`users`, `sermonize_api_tokens`, `authorization_codes`,
+`refresh_tokens`) and creating the new ones: the old OAuth subjects were MCP user ids and their tokens were
+linked by hand, so nothing can be carried over. Existing MCP clients get `invalid_token` / `invalid_grant`
+and sign in again with their Sermonize account. The old linked API tokens are not revoked by this; revoke
+them with the API CLI (`npm run cli -- revoke-token <id>`) if they are no longer needed.
 
 ## Tools
 
 Results are the API's JSON, returned as text content. List tools pass `cursor` and `limit`
 (1-500) through; use `next_cursor` from one page to get the next. The role is the minimum
-Sermonize role the **API** enforces for the caller's token; the MCP server itself checks nothing
-beyond "signed in and linked". Read tools carry `readOnlyHint: true`; write tools
+Sermonize role the **API** enforces for the caller's account; the MCP server itself checks nothing
+beyond "signed in". Read tools carry `readOnlyHint: true`; write tools
 `readOnlyHint: false, destructiveHint: false`.
 
 | tool | API | role |
@@ -165,7 +238,7 @@ from any other model are accepted by shape but give meaningless neighbours.
 
 **Labels written by an AI** must be proposed with `producer_kind: "model"` plus `model` and
 `producer`; the tool description tells the model so. The API records the label under the
-linked user, so both the account and the producing model are on record.
+signed-in user, so both the account and the producing model are on record.
 
 ### Deliberately not exposed
 
@@ -183,52 +256,63 @@ linked user, so both the account and the producing model are on record.
 
 ## Security notes
 
-- **Token mapping.** The OAuth access token's `sub` (the MCP user id, verified with signature,
-  issuer and audience) selects the Sermonize API token. Tool arguments never carry a user id or
-  token, and unknown arguments are dropped. Each call goes upstream as that user, so the API's
-  role checks, restricted-text rules and the **audit trail** (`created_by`, `reviewer_id`,
-  `audit_event.actor_id`) record the real person, not a shared service account.
-- **Encryption at rest.** Sermonize tokens are stored in the SQLite file encrypted with
-  AES-256-GCM (`SERMONIZE_TOKEN_KEY`, random 96-bit IV per write, the MCP user id as additional
-  authenticated data, so a ciphertext moved to another user's row does not decrypt). Losing the
-  key means re-linking all tokens; rotate by re-linking. Keep the key out of the SQLite file's
-  backups.
-- **No token output.** Tokens are never logged, printed by the CLI, or included in tool
-  results or error messages. The Fastify request log has method, URL, host, remote address and status, no headers or bodies.
-- **No PII beyond the MCP login.** The MCP server stores name, e-mail and an Argon2id password
-  hash per MCP user (for sign-in) plus the encrypted token. Sermonize account PII lives only in the
-  API's `private` schema and is never returned by the API.
-- The scaffold's production hardening list still applies (rate limiting, password reset,
-  refresh-token rotation/revocation, account disable, ...); see the scaffold notes in `LEARNED.md`.
-  Deleting an MCP user removes their linked token, so existing access tokens stop working for data
-  access immediately even before they expire.
+- **Identity.** The OAuth access token's `sub` is the Sermonize user id and its `sid` the grant (both
+  verified with signature, issuer and audience; the grant must still be active). The grant selects the
+  Sermonize API token. Tool arguments never carry a user id or token, and unknown arguments are dropped.
+  Each call goes upstream as that user, so the API's role checks, restricted-text rules and the **audit
+  trail** (`created_by`, `reviewer_id`, `audit_event.actor_id`) record the real person.
+- **Passwords** are only passed through to the API over `SERMONIZE_API_URL` (use HTTPS or a private
+  network), never stored, hashed, logged or echoed back into the form.
+- **Encryption at rest.** API tokens are stored in the SQLite file encrypted with AES-256-GCM
+  (`SERMONIZE_TOKEN_KEY`, random 96-bit IV per write, the grant id as additional authenticated data, so a
+  ciphertext moved to another grant's row does not decrypt). Losing or rotating the key only means users
+  sign in again (undecryptable grants are ended). Keep the key out of the SQLite file's backups.
+- **Consent ticket.** Between sign-in and consent the browser holds a random one-time ticket (stored as a
+  SHA-256 hash), bound to the exact OAuth request; the grant stays pending and unusable until it is
+  presented with *Approve*.
+- **No token output.** Tokens are never logged or included in tool results or error messages. The Fastify
+  request log has method, URL, host, remote address and status, no headers or bodies.
+- **No PII stored.** The SQLite file holds grant ids, Sermonize user ids, client ids and encrypted tokens;
+  the email typed into the sign-in form is only shown back on the consent page.
+- **Rate limiting** is the API's (per client IP). The server forwards `request.ip` as `X-Forwarded-For`; set
+  `TRUST_PROXY` here for the proxy in front of it, and list this server in the API's `TRUST_PROXY`.
+- The scaffold's remaining production notes still apply (refresh-token rotation, a revocation endpoint,
+  CIMD caching); see `LEARNED.md`.
 
 ## Development
 
 | script (in `packages/mcp`, or `-w @sermonize/mcp` from the root) | does |
 |---|---|
 | `npm run dev` / `npm run build` / `npm start` | run with reload / compile to `dist/` / run compiled |
-| `npm run typecheck` | `src/` + `scripts/` (strict, `exactOptionalPropertyTypes`) and `test/` |
-| `npm run user -- <command>` | MCP user CLI (root: `npm run mcp-user -- ...`) |
+| `npm run typecheck` | `src/` (strict, `exactOptionalPropertyTypes`) and `test/` |
 | `npm test` | vitest |
 
 Tests:
 
 - `connector.test.ts`: the client against a stub Fastify server (Bearer passthrough, query/path
-  encoding, JSON bodies, error JSON -> code/message/details, 401/403 explanations, timeouts,
-  unreachable API).
-- `token-crypto.test.ts`: encryption round trip, tamper/wrong-user/wrong-key detection, key parsing,
-  the SQLite token store.
-- `tools.test.ts`: discovery and the 401 challenge, the registered tool list and annotations,
-  per-user token passthrough, unlinked users.
-- `integration.test.ts`: MCP client -> MCP HTTP server -> the real API (`buildApp` from
-  `@sermonize/api`, resolved to its TypeScript sources through the `@sermonize/source` export
-  condition) -> the test database: `whoami`, `create_person` (audit attribution),
-  `search_persons` with pagination, work/source/text creation, `get_text_body` code-point slices,
-  403/404/401 mapping.
+  encoding, JSON bodies, login/logout, error JSON -> code/message/details, 401/403 explanations,
+  timeouts, unreachable API).
+- `token-crypto.test.ts`: encryption round trip, tamper/wrong-grant/wrong-key detection, key parsing,
+  the grant store (pending/active, ticket binding, cascade, sweep), the SQLite schema upgrade.
+- `config.test.ts`: `TRUST_PROXY`, `MCP_PUBLIC_URL` validation, and discovery metadata / 401 challenge
+  for `MCP_PUBLIC_URL=https://example.org`; all routes sit under proxy-routable prefixes.
+- `tools.test.ts` (stub API): discovery and the 401 challenge, the sign-in page, sign-in via
+  `POST /auth/login` (client `mcp`) with 401/429/5xx mapping, X-Forwarded-For with `TRUST_PROXY` on/off,
+  deny, ticket binding, sweeping, refresh-token capping, the registered tools and annotations,
+  per-grant token passthrough, upstream 401 -> sign in again.
+- `integration.test.ts`: the full OAuth code + PKCE flow against the real API (`buildApp` from
+  `@sermonize/api`, resolved to its TypeScript sources through the `@sermonize/source` export condition,
+  on an ephemeral port) with accounts registered through the API: `whoami` returns the API user id and
+  role, the `mcp` token and capped refresh token, wrong password, disabled account and revoked token ->
+  sign in again, logout of ended grants, the API's per-IP rate limit through the MCP server; then
+  `create_person` (audit attribution), `search_persons` with pagination, work/source/text creation,
+  `get_text_body` code-point slices, 403/404 mapping.
+
+The tests replace CIMD fetching with a fixed client (`resolveClient` option of `buildMcpApp`), since a
+CIMD document must be served over public HTTPS.
 
 **Shared test database.** The integration test uses the API's `TEST_DATABASE_URL`. The API suite
 drops and recreates its schemas in its globalSetup; this package's globalSetup only applies pending
 migrations (idempotent) and never drops anything, and the tests create their own uniquely named
-rows. The root `npm test` runs the workspaces one after another (API first), so the reset never
-overlaps an MCP run. Do not run both suites concurrently against the same database.
+rows and accounts. The root `npm test` runs the workspaces one after another (API first), so the reset
+never overlaps an MCP run. Do not run both suites concurrently against the same database.

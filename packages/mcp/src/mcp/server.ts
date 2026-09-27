@@ -2,8 +2,7 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import type { RequestHandlerExtra } from '@modelcontextprotocol/sdk/shared/protocol.js';
 import type { ServerNotification, ServerRequest, CallToolResult, ToolAnnotations } from '@modelcontextprotocol/sdk/types.js';
 import { z } from 'zod';
-import { describeApiError, type ConnectorContext, type SermonizeClient } from '../connector.js';
-import type { ApiTokenResolver } from '../storage/api-tokens.js';
+import { describeApiError, SermonizeApiError, SIGN_IN_AGAIN, type ConnectorContext, type SermonizeClient } from '../connector.js';
 
 type Extra = RequestHandlerExtra<ServerRequest, ServerNotification>;
 const oauthSecuritySchemes = [{ type: 'oauth2' as const, scopes: ['mcp'] }];
@@ -34,14 +33,36 @@ function errorResult(text: string): CallToolResult {
   return { content: [{ type: 'text', text }], isError: true };
 }
 
-export const NO_API_TOKEN_MESSAGE =
-  'Your MCP account is not linked to a Sermonize API token, so no Sermonize data can be accessed. ' +
-  'Ask the MCP server administrator to link one: npm run mcp-user -- update <your MCP user id> --api-token-stdin';
+/**
+ * Tool error when the grant's upstream API token is gone or was rejected by the API. Carries the
+ * `mcp/www_authenticate` hint (with error and error_description, which ChatGPT needs) so clients
+ * that support it offer to sign in again.
+ */
+function signInAgain(publicUrl: string): CallToolResult {
+  return {
+    content: [{ type: 'text', text: SIGN_IN_AGAIN }],
+    isError: true,
+    _meta: {
+      'mcp/www_authenticate': [
+        'Bearer resource_metadata="' + publicUrl + '/.well-known/oauth-protected-resource/mcp", scope="mcp", ' +
+          'error="invalid_token", error_description="Your Sermonize sign-in has expired or was revoked. Please sign in again."',
+      ],
+    },
+  };
+}
+
+/** The upstream Sermonize API token of an OAuth grant (see src/grants.ts). */
+export interface UpstreamTokens {
+  apiToken(grantId: string, userId: string): string | undefined;
+  isActive(grantId: string, userId: string): boolean;
+  /** Called when the API answered 401 for the grant's token: the grant ends, the client must re-authorize. */
+  invalidate(grantId: string): void;
+}
 
 export interface McpServerOptions {
   client: SermonizeClient;
-  /** Looks up the Sermonize API token of the authenticated MCP user (never taken from tool arguments). */
-  apiTokens: ApiTokenResolver;
+  /** Resolves the caller's grant (access token `sid`) to its Sermonize API token (never taken from tool arguments). */
+  upstream: UpstreamTokens;
   publicUrl: string;
 }
 
@@ -92,17 +113,18 @@ export function createMcpServer(options: McpServerOptions): McpServer {
     TOOL_ROLES[name] = config.role;
     const handler = async (args: z.infer<z.ZodObject<Shape>>, extra: Extra): Promise<CallToolResult> => {
       const userId = extra.authInfo?.extra?.userId;
+      const grantId = extra.authInfo?.extra?.grantId;
       if (!extra.authInfo?.token || typeof userId !== 'string') return authError(options.publicUrl);
-      let apiToken: string | undefined;
-      try {
-        apiToken = options.apiTokens.get(userId);
-      } catch {
-        return errorResult('The Sermonize API token stored for your MCP account cannot be decrypted. Ask the MCP server administrator to set it again.');
-      }
-      if (!apiToken) return errorResult(NO_API_TOKEN_MESSAGE);
+      const apiToken = typeof grantId === 'string' ? options.upstream.apiToken(grantId, userId) : undefined;
+      if (!apiToken) return signInAgain(options.publicUrl);
       try {
         return result(await run(args, { apiToken }));
       } catch (error) {
+        if (error instanceof SermonizeApiError && error.status === 401) {
+          // Expired, revoked, or the account was disabled: end the grant so the client re-authorizes.
+          options.upstream.invalidate(grantId as string);
+          return signInAgain(options.publicUrl);
+        }
         return errorResult(describeApiError(error));
       }
     };

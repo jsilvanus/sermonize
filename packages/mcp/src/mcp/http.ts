@@ -5,12 +5,13 @@ import type { AuthInfo } from '@modelcontextprotocol/sdk/server/auth/types.js';
 import type { Transport } from '@modelcontextprotocol/sdk/shared/transport.js';
 import { createMcpServer } from './server.js';
 import type { SermonizeClient } from '../connector.js';
-import type { ApiTokenResolver } from '../storage/api-tokens.js';
+import type { UpstreamTokens } from './server.js';
 import { verifyBearerToken } from '../auth.js';
 
 export interface McpHttpOptions {
   client: SermonizeClient;
-  apiTokens: ApiTokenResolver;
+  /** The upstream API token of each OAuth grant; an access token whose grant has ended is answered with 401. */
+  upstream: UpstreamTokens;
   publicUrl: string;
   jwtSecret: Uint8Array; resource: string;
   /**
@@ -48,12 +49,18 @@ export async function mountMcpHttp(app: FastifyInstance, options: McpHttpOptions
       try {
         const token = header.slice('Bearer '.length);
         const payload = await verifyBearerToken(token, options.jwtSecret, options.publicUrl, options.resource);
+        // The grant (sid) must still be active: once it ended (API rejected its token, refresh token
+        // expired), the access token is invalid too, so the client refreshes, fails, and re-authorizes.
+        if (typeof payload.sub !== 'string' || typeof payload.sid !== 'string' || !options.upstream.isActive(payload.sid, payload.sub)) {
+          throw new Error('grant ended');
+        }
         authInfo = {
           token,
           clientId: typeof payload.client_id === 'string' ? payload.client_id : 'oauth-client',
           scopes: typeof payload.scope === 'string' ? payload.scope.split(' ') : [],
           extra: {
-            ...(typeof payload.sub === 'string' ? { userId: payload.sub } : {}),
+            userId: payload.sub,
+            grantId: payload.sid,
           },
         };
       } catch {
@@ -62,7 +69,7 @@ export async function mountMcpHttp(app: FastifyInstance, options: McpHttpOptions
       }
     }
 
-    const server = createMcpServer({ client: options.client, apiTokens: options.apiTokens, publicUrl: options.publicUrl });
+    const server = createMcpServer({ client: options.client, upstream: options.upstream, publicUrl: options.publicUrl });
     const transport = new StreamableHTTPServerTransport({});
     await server.connect(transport as unknown as Transport);
 

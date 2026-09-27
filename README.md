@@ -31,8 +31,9 @@ sermonize/
 - **`@sermonize/api`** owns the data: PostgreSQL + pgvector, auth, roles, audit. Everything
   below describes it.
 - **`@sermonize/mcp`** is a remote MCP server (Streamable HTTP + OAuth) that lets MCP clients use
-  the API. It talks only to the REST API over HTTP, with each MCP user's own API token, and
-  contains no domain logic or AI processing. See [`packages/mcp/README.md`](packages/mcp/README.md).
+  the API. Users sign in with their Sermonize account; it talks only to the REST API over HTTP, with
+  the API token that sign-in obtained, and contains no domain logic or AI processing. See
+  [`packages/mcp/README.md`](packages/mcp/README.md).
 - **`@sermonize/web`** is a small server-rendered web UI (no client JavaScript): corpus counts,
   registration, sign-in, account and sign-out. It also talks only to the REST API over HTTP and keeps
   the user's API token in a signed httpOnly cookie. See [`packages/web/README.md`](packages/web/README.md).
@@ -46,9 +47,42 @@ Root scripts (run from the repository root):
 | `npm run dev:api` / `npm run dev:mcp` / `npm run dev:web` | API (port 3000) / MCP server (port 5999) / web UI (port 3100) with reload |
 | `npm run migrate` | apply API migrations to `DATABASE_URL` |
 | `npm run cli -- <command>` | the API admin CLI (see below) |
-| `npm run mcp-user -- <command>` | the MCP user CLI (see `packages/mcp/README.md`) |
 
 A single package can be targeted with `-w`, e.g. `npm test -w @sermonize/api`.
+
+## Accounts and sign-in (one account everywhere)
+
+There is one user store: the API's (`app_user`, with email and argon2id password hash in the `private` schema).
+The same email and password sign in to the web UI and to MCP clients; neither the web app nor the MCP server
+stores or hashes passwords, both call the API's `POST /auth/login`.
+
+```
+ browser ----> @sermonize/web ---- POST /auth/login {client:"web"} ---+
+                (session cookie = token)                              |
+                                                                      v
+ MCP client -> @sermonize/mcp ---- POST /auth/login {client:"mcp"} -> @sermonize/api
+   (OAuth)      (grant -> encrypted token)                            ^   (users, roles,
+                                                                      |    tokens, audit)
+ scripts ------------------ Authorization: Bearer <token> ------------+
+```
+
+API token kinds (all are rows of `private.api_token`, stored as SHA-256 hashes, revocable, sent as
+`Authorization: Bearer sz_...`):
+
+| token | name | created by | lifetime |
+|---|---|---|---|
+| web session | `web` | `POST /auth/login` (default `client: "web"`), via the web sign-in form | `LOGIN_TOKEN_TTL_HOURS` (12 h); revoked at sign-out |
+| MCP grant | `mcp` | `POST /auth/login` with `client: "mcp"`, via the MCP OAuth sign-in page | `MCP_LOGIN_TOKEN_TTL_HOURS` (720 h = 30 days); revoked when the OAuth grant ends |
+| script / service | chosen by the admin | `npm run cli -- create-token` or `POST /admin/users/:id/tokens` | chosen by the admin (may be unlimited) |
+| (before `0004`) | `login` | `POST /auth/login` | `LOGIN_TOKEN_TTL_HOURS` |
+
+Roles (`reader < contributor < curator < admin`) belong to the account, so a user has the same permissions in
+the web UI, through MCP tools and with scripts. Disabling a user or revoking a token takes effect at once
+everywhere; the MCP server then asks the client to sign in again.
+
+Rate limiting of register/login is per client IP in the API. The web app and the MCP server forward the end user's
+IP as `X-Forwarded-For`, so the API's `TRUST_PROXY` must list the hosts they run on (and nginx, if it talks to the
+API directly); each of them has its own `TRUST_PROXY` for the proxy in front of it.
 
 ## Architecture
 
@@ -431,19 +465,21 @@ Password accounts and statistics (added with `@sermonize/web`, migration `0003_p
   403 `registration_closed` unless `REGISTRATION_OPEN=true`. Password 12–256 characters (code points), else 400.
   A duplicate email (case-insensitive) is a 409 `conflict` whose message does not echo the address.
   Creates an active `human` user with `REGISTRATION_DEFAULT_ROLE`, its `user_pii` and an argon2id `password_credential`.
-- `POST /auth/login` (public) `{ email, password }` → `{ token, expires_at, user_id, role }`: a new API token named
-  `login` expiring after `LOGIN_TOKEN_TTL_HOURS` (default 12). Every failure (unknown email, wrong password,
+- `POST /auth/login` (public) `{ email, password, client? }` → `{ token, expires_at, user_id, role }`: a new API
+  token named after `client` — `"web"` (default) expiring after `LOGIN_TOKEN_TTL_HOURS` (default 12), or `"mcp"`
+  (used by `@sermonize/mcp`) expiring after `MCP_LOGIN_TOKEN_TTL_HOURS` (default 720 = 30 days); any other value
+  is a 400. (Tokens issued before migration `0004` are named `login`.) Every failure (unknown email, wrong password,
   disabled user, user without a password) is the same 401 `invalid_credentials`; unknown emails still run an
   argon2 verification against a dummy hash, and the status is checked only after verification.
 - `POST /auth/logout` (any authenticated caller) revokes the token used for the request → 204.
 - Register and login are rate-limited per client IP (`AUTH_RATE_LIMIT_MAX` requests per
   `AUTH_RATE_LIMIT_WINDOW_SECONDS`, default 10 per 60 s, in memory, per process; `0` disables) → 429 `rate_limited`.
-  Behind a proxy (e.g. `@sermonize/web`, which forwards the browser IP as `X-Forwarded-For`), set `TRUST_PROXY`
-  to the proxy's address, otherwise all its users share one bucket.
+  Behind a proxy (`@sermonize/web` and `@sermonize/mcp` forward the end user's IP as `X-Forwarded-For`; nginx),
+  set `TRUST_PROXY` to the addresses of all of them, otherwise all their users share one bucket.
 - Audit: the actor of registration and login is **the user themself** (the new user id is set as `app.user_id`
   inside the SECURITY DEFINER functions), not the system user, so the trail shows who created the account without
   any PII. Registration writes `insert app_user` (id, kind, role, status), `pii_update user_pii` (field names only)
-  and `password_set password_credential`; login writes `token_create` (`via: login`), logout `token_revoke` (`via: logout`).
+  and `password_set password_credential`; login writes `token_create` (`via: login`, `client: web|mcp`), logout `token_revoke` (`via: logout`).
 - `GET /stats` (public) → aggregate counts: `persons, works, works_by_genre, sermons, texts, texts_by_language,
   sources, segmentations, chunks, embedding_spaces, embeddings, complete_clustering_runs, clusters, labels`.
   Withdrawn records are excluded (chunks of withdrawn segmentations, embeddings of withdrawn spaces); clusters and
@@ -492,7 +528,7 @@ which migration `0001_init` creates for bootstrapping.
 Environment: `DATABASE_URL`, `TEST_DATABASE_URL`, `PORT` (3000), `HOST` (127.0.0.1),
 `LOG_LEVEL` (info), `MAX_BATCH_ITEMS` (5000), `TRUST_PROXY` (false; `true` or comma-separated proxy addresses/CIDRs),
 `REGISTRATION_OPEN` (false), `REGISTRATION_DEFAULT_ROLE` (reader; only `reader`/`contributor`),
-`LOGIN_TOKEN_TTL_HOURS` (12), `AUTH_RATE_LIMIT_MAX` (10; 0 disables), `AUTH_RATE_LIMIT_WINDOW_SECONDS` (60).
+`LOGIN_TOKEN_TTL_HOURS` (12, web sign-in), `MCP_LOGIN_TOKEN_TTL_HOURS` (720, MCP sign-in), `AUTH_RATE_LIMIT_MAX` (10; 0 disables), `AUTH_RATE_LIMIT_WINDOW_SECONDS` (60).
 Invalid values stop the server at startup.
 
 Scripts of `packages/api` (run them there, with `-w @sermonize/api` from the root, or via the root scripts above):
@@ -523,7 +559,8 @@ and grants it: `SELECT/INSERT/UPDATE` on public tables (immutability is enforced
 functions `private.resolve_token`, `create_api_token`, `revoke_api_token`, `set_user_pii`, and since `0003`
 `register_user`, `get_password_credential`, `create_login_token`, `revoke_own_token`). The admin functions check for
 an active admin principal; the `0003` ones need none but each does one narrow thing (register only readers/contributors;
-look up a credential; store a `login` token with a future expiry for an active user with a password; revoke the
+look up a credential; store a `web` or `mcp` login token (since `0004`; `login` before) with a future expiry for an
+active user with a password; revoke the
 caller's own token). `get_password_credential` returns password hashes to the application role, since verification
 happens in Node.
 Re-run it after every migration that adds tables or functions:
@@ -552,6 +589,11 @@ can only be set by the withdraw transition.
 
 Migration `0003_password_auth` adds `private.password_credential`, a unique index on `lower(user_pii.email)` and the
 self-service auth functions described above.
+
+Migration `0004_login_token_client` replaces `private.create_login_token(uuid, text, timestamptz)` with
+`create_login_token(uuid, text, timestamptz, text)`: the last argument is the client (`web` or `mcp`), which becomes
+the token name and is recorded in the `token_create` audit event. It re-grants `EXECUTE` to `sermonize_app` when that
+role exists, so a running deployment keeps working before `roles.sql` is re-run (which lists the new signature).
 
 ## Explicit non-goals for v1
 

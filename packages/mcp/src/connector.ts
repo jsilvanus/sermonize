@@ -3,12 +3,13 @@
  *
  * This is the only place that talks to Sermonize, and it does so over HTTP only: no database access,
  * no domain logic beyond mapping arguments to paths/query strings/bodies, no AI processing.
- * Every call carries the Sermonize API token of the MCP user on whose behalf it runs, so the API's
- * role checks and audit trail apply to the real user. Tokens are never logged or put into error text.
+ * Every tool call carries the Sermonize API token of the OAuth grant it runs under (obtained when the
+ * user signed in with their Sermonize account), so the API's role checks and audit trail apply to the
+ * real user. Tokens are never logged or put into error text.
  */
 
 export interface ConnectorContext {
-  /** The Sermonize API token of the authenticated MCP user (resolved server-side, never a tool argument). */
+  /** The Sermonize API token of the caller's OAuth grant (resolved server-side, never a tool argument). */
   apiToken: string;
 }
 
@@ -24,6 +25,14 @@ export interface Me {
   user_id: string;
   role: 'reader' | 'contributor' | 'curator' | 'admin';
   kind: 'human' | 'service';
+}
+
+export interface LoginResult {
+  token: string;
+  /** ISO timestamp. */
+  expires_at: string;
+  user_id: string;
+  role: Me['role'];
 }
 
 export interface TextBody {
@@ -151,10 +160,18 @@ export class SermonizeClient {
     path: string,
     options: { query?: Query; body?: unknown } = {},
   ): Promise<T> {
-    const headers: Record<string, string> = {
-      accept: 'application/json',
-      authorization: `Bearer ${context.apiToken}`,
-    };
+    return this.send<T>(method, path, { ...options, token: context.apiToken });
+  }
+
+  /** One HTTP call; `token` becomes the Bearer header, `clientIp` the X-Forwarded-For header. */
+  private async send<T>(
+    method: 'GET' | 'POST',
+    path: string,
+    options: { query?: Query; body?: unknown; token?: string; clientIp?: string } = {},
+  ): Promise<T> {
+    const headers: Record<string, string> = { accept: 'application/json' };
+    if (options.token !== undefined) headers.authorization = `Bearer ${options.token}`;
+    if (options.clientIp) headers['x-forwarded-for'] = options.clientIp;
     if (options.body !== undefined) headers['content-type'] = 'application/json';
 
     let response: Response;
@@ -164,6 +181,7 @@ export class SermonizeClient {
         headers,
         ...(options.body !== undefined ? { body: JSON.stringify(options.body) } : {}),
         signal: AbortSignal.timeout(this.timeoutMs),
+        redirect: 'error',
       });
     } catch (error) {
       const name = (error as { name?: string } | null)?.name;
@@ -189,6 +207,26 @@ export class SermonizeClient {
       typeof error?.message === 'string' ? error.message : response.statusText || 'request failed',
       error?.details,
     );
+  }
+
+  // --- sign-in (no token; used by the OAuth sign-in page and grant cleanup) -------------------
+
+  /**
+   * `POST /auth/login` with `client: 'mcp'`: verifies the user's Sermonize email and password and
+   * returns a new API token (named `mcp`, lifetime MCP_LOGIN_TOKEN_TTL_HOURS on the API).
+   * `clientIp` is the end user's address, forwarded so the API's per-IP rate limit sees the person,
+   * not this server (the API trusts it only if its TRUST_PROXY lists this server).
+   */
+  login(credentials: { email: string; password: string }, clientIp?: string): Promise<LoginResult> {
+    return this.send<LoginResult>('POST', '/auth/login', {
+      body: { email: credentials.email, password: credentials.password, client: 'mcp' },
+      ...(clientIp ? { clientIp } : {}),
+    });
+  }
+
+  /** `POST /auth/logout`: revokes this API token. */
+  async logout(apiToken: string): Promise<void> {
+    await this.send<null>('POST', '/auth/logout', { token: apiToken });
   }
 
   private get<T = JsonObject>(context: ConnectorContext, path: string, query?: Query): Promise<T> {
@@ -257,6 +295,11 @@ export class SermonizeClient {
   }
 }
 
+/** Guidance when the upstream API token no longer works (expired, revoked, or the account was disabled). */
+export const SIGN_IN_AGAIN =
+  'Your Sermonize sign-in has expired or was revoked (or your account was disabled). ' +
+  'Please sign in again: reconnect or re-authorize this MCP server in your MCP client, using your Sermonize account.';
+
 /** Human-readable tool error text for an API error: `<code> (HTTP <status>): <message>`, plus guidance and details. */
 export function describeApiError(error: unknown): string {
   if (!(error instanceof SermonizeApiError)) {
@@ -266,10 +309,7 @@ export function describeApiError(error: unknown): string {
     `Sermonize API error ${error.code}` + (error.status ? ` (HTTP ${error.status})` : '') + `: ${error.message}`,
   ];
   if (error.status === 401) {
-    lines.push(
-      'The Sermonize API rejected the API token linked to your MCP account (missing, invalid, expired or revoked). ' +
-        'Ask the MCP server administrator to set a valid one (npm run mcp-user -- update <id> --api-token-stdin).',
-    );
+    lines.push(SIGN_IN_AGAIN);
   } else if (error.status === 403) {
     lines.push(
       'Your Sermonize account is not allowed to do this. Roles are reader < contributor < curator < admin; ' +

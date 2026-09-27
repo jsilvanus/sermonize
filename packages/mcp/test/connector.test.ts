@@ -11,6 +11,7 @@ interface Seen {
   url: string;
   authorization: string | undefined;
   contentType: string | undefined;
+  forwardedFor?: string | string[] | undefined;
   body: unknown;
 }
 
@@ -27,6 +28,7 @@ beforeAll(async () => {
       url: request.url,
       authorization: request.headers.authorization,
       contentType: request.headers['content-type'],
+      forwardedFor: request.headers['x-forwarded-for'],
       body: undefined,
     });
   });
@@ -46,6 +48,14 @@ beforeAll(async () => {
   );
   stub.get('/works/:id', async (_request, reply) => reply.code(401).send({ error: { code: 'unauthorized', message: 'invalid, expired or revoked token' } }));
   stub.get('/sources/:id', async (_request, reply) => reply.code(502).type('text/html').send('<html>bad gateway</html>'));
+  stub.post('/auth/login', async (request) => ({
+    token: 'sz_login',
+    expires_at: '2030-01-01T00:00:00.000Z',
+    user_id: 'u1',
+    role: 'reader',
+    echo: request.body,
+  }));
+  stub.post('/auth/logout', async (_request, reply) => reply.code(204).send());
   stub.get('/slow', async () => {
     await new Promise((resolve) => setTimeout(resolve, 500));
     return {};
@@ -133,8 +143,17 @@ describe('SermonizeClient', () => {
     const e401 = await client().getWork(ctx, 'w1').catch((e: unknown) => e);
     expect(e401).toMatchObject({ status: 401, code: 'unauthorized' });
     const text = describeApiError(e401);
-    expect(text).toContain('rejected the API token linked to your MCP account');
+    expect(text).toContain('Please sign in again');
     expect(text).not.toContain(ctx.apiToken);
+  });
+
+  it("login posts client 'mcp' without a Bearer header and forwards the client IP; logout sends the token", async () => {
+    const res = await client().login({ email: 'a@example.org', password: 'pw' }, '203.0.113.9');
+    expect(res).toMatchObject({ token: 'sz_login', user_id: 'u1', role: 'reader' });
+    expect(seen[0]).toMatchObject({ method: 'POST', url: '/auth/login', authorization: undefined, forwardedFor: '203.0.113.9' });
+    expect(seen[0]!.body).toEqual({ email: 'a@example.org', password: 'pw', client: 'mcp' });
+    await client().logout('sz_login');
+    expect(seen[1]).toMatchObject({ method: 'POST', url: '/auth/logout', authorization: 'Bearer sz_login' });
   });
 
   it('maps non-JSON error responses to http_<status>', async () => {

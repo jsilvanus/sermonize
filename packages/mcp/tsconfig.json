@@ -13,5 +13,5 @@
     "noEmit": true,
     "customConditions": ["@sermonize/source"]
   },
-  "include": ["src", "scripts"]
+  "include": ["src"]
 }

@@ -1,9 +1,10 @@
 /**
- * Encryption at rest for the per-user Sermonize API tokens (AES-256-GCM).
+ * Encryption at rest for the upstream Sermonize API tokens (AES-256-GCM).
  *
  * Stored format: `v1.<base64url(iv)>.<base64url(ciphertext)>.<base64url(tag)>`, 12-byte random IV,
- * 16-byte tag. The MCP user id is bound as additional authenticated data, so a ciphertext copied to
- * another user's row fails to decrypt instead of silently granting that user's API access.
+ * 16-byte tag. A binding value (the OAuth grant id) is bound as additional authenticated data, so a
+ * ciphertext copied to another grant's row fails to decrypt instead of silently granting that
+ * grant's holder another user's API access.
  */
 import { createCipheriv, createDecipheriv, randomBytes } from 'node:crypto';
 
@@ -19,28 +20,28 @@ export function parseTokenKey(value: string | undefined): Buffer {
   return key;
 }
 
-export function encryptToken(key: Buffer, userId: string, token: string): string {
+export function encryptToken(key: Buffer, binding: string, token: string): string {
   const iv = randomBytes(IV_BYTES);
   const cipher = createCipheriv('aes-256-gcm', key, iv, { authTagLength: TAG_BYTES });
-  cipher.setAAD(Buffer.from(userId, 'utf8'));
+  cipher.setAAD(Buffer.from(binding, 'utf8'));
   const ciphertext = Buffer.concat([cipher.update(token, 'utf8'), cipher.final()]);
   return [VERSION, iv, ciphertext, cipher.getAuthTag()]
     .map((part) => (typeof part === 'string' ? part : part.toString('base64url')))
     .join('.');
 }
 
-/** Throws if the value is malformed, was encrypted with another key or for another user, or was altered. */
-export function decryptToken(key: Buffer, userId: string, stored: string): string {
+/** Throws if the value is malformed, was encrypted with another key or for another binding, or was altered. */
+export function decryptToken(key: Buffer, binding: string, stored: string): string {
   const parts = stored.split('.');
   if (parts.length !== 4 || parts[0] !== VERSION) throw new Error('unsupported encrypted token format');
   const [iv, ciphertext, tag] = parts.slice(1).map((p) => Buffer.from(p, 'base64url')) as [Buffer, Buffer, Buffer];
   if (iv.length !== IV_BYTES || tag.length !== TAG_BYTES) throw new Error('unsupported encrypted token format');
   const decipher = createDecipheriv('aes-256-gcm', key, iv, { authTagLength: TAG_BYTES });
-  decipher.setAAD(Buffer.from(userId, 'utf8'));
+  decipher.setAAD(Buffer.from(binding, 'utf8'));
   decipher.setAuthTag(tag);
   try {
     return Buffer.concat([decipher.update(ciphertext), decipher.final()]).toString('utf8');
   } catch {
-    throw new Error('encrypted token failed authentication (wrong key, wrong user or tampered data)');
+    throw new Error('encrypted token failed authentication (wrong key, wrong grant or tampered data)');
   }
 }

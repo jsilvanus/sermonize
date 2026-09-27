@@ -1,92 +1,96 @@
 import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
-import type { AuthStore, AuthorizationCodeRecord, RefreshTokenRecord, McpUser, UserStore } from './interface.js';
+import type { AuthStore, AuthorizationCodeRecord, RefreshTokenRecord } from './interface.js';
+
+/**
+ * Schema version kept in `PRAGMA user_version`.
+ *
+ * 0/1: the scaffold's schema plus MCP's own users (`users` with argon2 password hashes) and per-user
+ *      linked API tokens (`sermonize_api_tokens`).
+ * 2:   sign-in through the Sermonize API; one encrypted upstream token per OAuth grant (`grants`),
+ *      codes and refresh tokens reference their grant.
+ *
+ * Upgrading from 0/1 DROPS the old tables: the old OAuth subjects were MCP user ids, not Sermonize
+ * user ids, and the old tokens were linked by hand, so nothing can be carried over. Every MCP client
+ * simply signs in again with its Sermonize (web) account. Nothing else lives in this file.
+ */
+export const SCHEMA_VERSION = 2;
+
+export function migrateSchema(db: DatabaseSync): void {
+  const version = (db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version;
+  if (version === SCHEMA_VERSION) return;
+  if (version > SCHEMA_VERSION) {
+    throw new Error(`STORAGE_PATH has schema version ${version}, newer than this server (${SCHEMA_VERSION})`);
+  }
+  db.exec('BEGIN IMMEDIATE');
+  try {
+    db.exec(
+      'DROP TABLE IF EXISTS authorization_codes; DROP TABLE IF EXISTS refresh_tokens;' +
+        'DROP TABLE IF EXISTS sermonize_api_tokens; DROP TABLE IF EXISTS users; DROP TABLE IF EXISTS grants;' +
+        'CREATE TABLE grants (id TEXT PRIMARY KEY, subject TEXT NOT NULL, client_id TEXT NOT NULL,' +
+        ' api_token TEXT NOT NULL, api_token_expires INTEGER NOT NULL,' +
+        ' ticket_sha256 TEXT UNIQUE, request_sha256 TEXT, expires INTEGER NOT NULL, created_at INTEGER NOT NULL);' +
+        'CREATE INDEX grants_expires ON grants (expires);' +
+        'CREATE TABLE authorization_codes (code TEXT PRIMARY KEY, grant_id TEXT NOT NULL REFERENCES grants (id) ON DELETE CASCADE,' +
+        ' client_id TEXT NOT NULL, redirect_uri TEXT NOT NULL, challenge TEXT NOT NULL, subject TEXT NOT NULL, scope TEXT NOT NULL, expires INTEGER NOT NULL);' +
+        'CREATE INDEX authorization_codes_grant ON authorization_codes (grant_id);' +
+        'CREATE TABLE refresh_tokens (token TEXT PRIMARY KEY, grant_id TEXT NOT NULL REFERENCES grants (id) ON DELETE CASCADE,' +
+        ' client_id TEXT NOT NULL, subject TEXT NOT NULL, scope TEXT NOT NULL, expires INTEGER NOT NULL);' +
+        'CREATE INDEX refresh_tokens_grant ON refresh_tokens (grant_id);' +
+        `PRAGMA user_version = ${SCHEMA_VERSION};`,
+    );
+    db.exec('COMMIT');
+  } catch (error) {
+    db.exec('ROLLBACK');
+    throw error;
+  }
+}
+
+/** Opens (creating if needed) the SQLite file and brings its schema up to date. */
+export function openDatabase(path: string): DatabaseSync {
+  if (path !== ':memory:') mkdirSync(dirname(path), { recursive: true });
+  const db = new DatabaseSync(path);
+  db.exec('PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 5000;');
+  migrateSchema(db);
+  return db;
+}
+
+type CodeRow = { code: string; grant_id: string; client_id: string; redirect_uri: string; challenge: string; subject: string; scope: string; expires: number };
+type RefreshRow = { token: string; grant_id: string; client_id: string; subject: string; scope: string; expires: number };
 
 export class SqliteAuthStore implements AuthStore {
-  private readonly db: DatabaseSync;
-
-  constructor(path: string) {
-    mkdirSync(dirname(path), { recursive: true });
-    this.db = new DatabaseSync(path);
-    this.db.exec(
-      'CREATE TABLE IF NOT EXISTS users (id TEXT PRIMARY KEY, name TEXT NOT NULL, email TEXT UNIQUE, password_hash TEXT, created_at INTEGER NOT NULL);' +
-      'CREATE TABLE IF NOT EXISTS authorization_codes (code TEXT PRIMARY KEY, client_id TEXT NOT NULL, redirect_uri TEXT NOT NULL, challenge TEXT NOT NULL, subject TEXT NOT NULL, scope TEXT NOT NULL, expires INTEGER NOT NULL);' +
-      'CREATE TABLE IF NOT EXISTS refresh_tokens (token TEXT PRIMARY KEY, client_id TEXT NOT NULL, subject TEXT NOT NULL, scope TEXT NOT NULL, expires INTEGER NOT NULL);'
-    );
-    try { this.db.exec('ALTER TABLE users ADD COLUMN password_hash TEXT'); } catch { /* already exists */ }
-  }
+  constructor(private readonly db: DatabaseSync) {}
 
   getDatabase(): DatabaseSync {
     return this.db;
   }
 
   saveAuthorizationCode(record: AuthorizationCodeRecord): void {
-    this.db.prepare('INSERT INTO authorization_codes (code, client_id, redirect_uri, challenge, subject, scope, expires) VALUES (?, ?, ?, ?, ?, ?, ?)')
-      .run(record.code, record.clientId, record.redirectUri, record.challenge, record.subject, record.scope, record.expires);
+    this.db.prepare('INSERT INTO authorization_codes (code, grant_id, client_id, redirect_uri, challenge, subject, scope, expires) VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
+      .run(record.code, record.grantId, record.clientId, record.redirectUri, record.challenge, record.subject, record.scope, record.expires);
   }
 
   consumeAuthorizationCode(code: string): AuthorizationCodeRecord | undefined {
-    const row = this.db.prepare('SELECT code, client_id, redirect_uri, challenge, subject, scope, expires FROM authorization_codes WHERE code = ? AND expires >= ?')
-      .get(code, Date.now()) as {code:string;client_id:string;redirect_uri:string;challenge:string;subject:string;scope:string;expires:number}|undefined;
-    if (!row) {
-      this.db.prepare('DELETE FROM authorization_codes WHERE code = ?').run(code);
-      return undefined;
-    }
+    const row = this.db.prepare('SELECT code, grant_id, client_id, redirect_uri, challenge, subject, scope, expires FROM authorization_codes WHERE code = ? AND expires >= ?')
+      .get(code, Date.now()) as CodeRow | undefined;
     this.db.prepare('DELETE FROM authorization_codes WHERE code = ?').run(code);
-    return { code: row.code, clientId: row.client_id, redirectUri: row.redirect_uri, challenge: row.challenge, subject: row.subject, scope: row.scope, expires: row.expires };
+    if (!row) return undefined;
+    return { code: row.code, grantId: row.grant_id, clientId: row.client_id, redirectUri: row.redirect_uri, challenge: row.challenge, subject: row.subject, scope: row.scope, expires: row.expires };
   }
 
   saveRefreshToken(record: RefreshTokenRecord): void {
-    this.db.prepare('INSERT INTO refresh_tokens (token, client_id, subject, scope, expires) VALUES (?, ?, ?, ?, ?)')
-      .run(record.token, record.clientId, record.subject, record.scope, record.expires);
+    this.db.prepare('INSERT INTO refresh_tokens (token, grant_id, client_id, subject, scope, expires) VALUES (?, ?, ?, ?, ?, ?)')
+      .run(record.token, record.grantId, record.clientId, record.subject, record.scope, record.expires);
   }
 
   getRefreshToken(token: string): RefreshTokenRecord | undefined {
-    const row = this.db.prepare('SELECT token, client_id, subject, scope, expires FROM refresh_tokens WHERE token = ?')
-      .get(token) as {token:string;client_id:string;subject:string;scope:string;expires:number}|undefined;
+    const row = this.db.prepare('SELECT token, grant_id, client_id, subject, scope, expires FROM refresh_tokens WHERE token = ?')
+      .get(token) as RefreshRow | undefined;
     if (!row || row.expires < Date.now()) {
       if (row) this.db.prepare('DELETE FROM refresh_tokens WHERE token = ?').run(token);
       return undefined;
     }
-    return { token: row.token, clientId: row.client_id, subject: row.subject, scope: row.scope, expires: row.expires };
-  }
-}
-
-export class SqliteUserStore implements UserStore {
-  constructor(private readonly db: DatabaseSync) {}
-
-  createUser(user: McpUser): void {
-    this.db.prepare('INSERT INTO users (id, name, email, password_hash, created_at) VALUES (?, ?, ?, ?, ?)')
-      .run(user.id, user.name, user.email ?? null, user.passwordHash ?? null, user.createdAt);
-  }
-
-  listUsers(): McpUser[] {
-    const rows = this.db.prepare('SELECT id, name, email, password_hash, created_at FROM users ORDER BY name, id').all() as Array<{id:string;name:string;email:string|null;password_hash:string|null;created_at:number}>;
-    return rows.map(row => ({ id: row.id, name: row.name, ...(row.email ? {email:row.email} : {}), ...(row.password_hash ? {passwordHash:row.password_hash} : {}), createdAt: row.created_at }));
-  }
-
-  getUser(id: string): McpUser | undefined {
-    return this.map(this.db.prepare('SELECT id, name, email, password_hash, created_at FROM users WHERE id = ?').get(id) as {id:string;name:string;email:string|null;password_hash:string|null;created_at:number}|undefined);
-  }
-
-  getUserByEmail(email: string): McpUser | undefined {
-    return this.map(this.db.prepare('SELECT id, name, email, password_hash, created_at FROM users WHERE lower(email) = lower(?)').get(email) as {id:string;name:string;email:string|null;password_hash:string|null;created_at:number}|undefined);
-  }
-
-  updateUser(id: string, patch: {name?:string;email?:string;passwordHash?:string}): McpUser | undefined {
-    const current = this.getUser(id);
-    if (!current) return undefined;
-    this.db.prepare('UPDATE users SET name = ?, email = ?, password_hash = ? WHERE id = ?')
-      .run(patch.name ?? current.name, patch.email ?? current.email ?? null, patch.passwordHash ?? current.passwordHash ?? null, id);
-    return this.getUser(id);
-  }
-
-  deleteUser(id: string): boolean {
-    return this.db.prepare('DELETE FROM users WHERE id = ?').run(id).changes > 0;
-  }
-
-  private map(row: {id:string;name:string;email:string|null;password_hash:string|null;created_at:number}|undefined): McpUser|undefined {
-    return row ? {id:row.id,name:row.name,...(row.email ? {email:row.email}:{}),...(row.password_hash ? {passwordHash:row.password_hash}:{}),createdAt:row.created_at} : undefined;
+    return { token: row.token, grantId: row.grant_id, clientId: row.client_id, subject: row.subject, scope: row.scope, expires: row.expires };
   }
 }

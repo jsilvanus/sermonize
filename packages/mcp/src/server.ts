@@ -2,7 +2,7 @@ import { buildMcpApp } from './app.js';
 import { loadConfig } from './config.js';
 
 const config = loadConfig();
-const app = await buildMcpApp(config, { level: config.logLevel });
+const app = await buildMcpApp(config, { logger: { level: config.logLevel } });
 
 async function shutdown(signal: string): Promise<void> {
   app.log.info({ signal }, 'shutting down');
