@@ -101,7 +101,7 @@ describe('admin routes', () => {
     expect((await api(ctx.app, issued.token, { method: 'GET', url: '/me' })).statusCode).toBe(401);
 
     const audit = await ctx.pool.query(
-      `SELECT action, changes FROM audit_event WHERE entity_type = 'api_token' AND entity_id = $1 ORDER BY id`,
+      `SELECT action, changes FROM audit_event WHERE entity_type = 'api_token' AND entity_id = $1 ORDER BY occurred_at, id`,
       [issued.id],
     );
     expect(audit.rows.map((r) => r.action)).toEqual(['token_create', 'token_revoke']);

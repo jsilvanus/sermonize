@@ -8,6 +8,7 @@ import { registerErrorHandlers } from './plugins/errors.js';
 import { adminRoutes } from './routes/admin.js';
 import { healthRoutes } from './routes/health.js';
 import { meRoutes } from './routes/me.js';
+import { scholarlyRoutes } from './routes/scholarly/index.js';
 
 export interface BuildAppOptions {
   /** Connection pool; owned by the caller (not closed by app.close()). */
@@ -35,6 +36,7 @@ export async function buildApp({ pool, logger = false }: BuildAppOptions) {
   await app.register(healthRoutes);
   await app.register(meRoutes);
   await app.register(adminRoutes);
+  await app.register(scholarlyRoutes);
 
   await app.ready();
   return app;

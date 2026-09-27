@@ -260,6 +260,22 @@ Scholarly:
 - `POST/GET /texts`, `GET/PATCH /texts/:id` (metadata only), `GET /texts/:id/body?start=&end=`, `PUT /texts/:id/persons`
 - `POST /{persons,works,sources,texts}/:id/withdraw`
 
+Scholarly API details (added in Phase 2, where the spec above left them open):
+- Create (`POST`) needs `contributor`; `PATCH`, the `PUT` replace endpoints and withdraw need `curator`.
+  So that contributors can still attribute what they create, `POST /works` accepts optional
+  `persons` and `occasion`, and `POST /texts` optional `persons` (same shapes as the `PUT` bodies).
+- `POST` accepts an optional client `id`; server-owned fields (`created_by`, `withdrawn_*`,
+  `content_sha256`, …) and unknown fields in a body are ignored. A `PATCH` naming no updatable
+  field is a 400; a `PATCH /texts/:id` containing `body` is a 409 `immutable`.
+- Withdraw takes `{ "reason": string }` (required); withdrawing twice is a 409. Lists hide withdrawn
+  records unless `?include_withdrawn=true`; `GET /…/:id` still returns them.
+- `GET /works/:id` includes `persons` and `occasion` (null unless set); `GET /texts/:id` includes
+  `persons` and `effective_access_level`. List items omit the nested arrays. Text bodies are only
+  returned by `GET /texts/:id/body` (code-point offsets, `0 ≤ start ≤ end ≤ char_length`).
+- `GET /works?year_from=&year_to=` selects works whose date range overlaps the given range; undated works
+  are excluded. `GET /persons?q=` matches `display_name` and `name_variants` (case-insensitive substring).
+- `PATCH /works/:id` rejects a `part_of_work_id` that would create a cycle (422).
+
 Derived (batch endpoints accept up to 5,000 items and are idempotent on natural keys):
 - `POST /segmentations`, `GET /segmentations/:id`, `POST /segmentations/:id/chunks`, `GET /segmentations/:id/chunks`
 - `GET /chunks/:id`, `GET /chunks/:id/provenance`
@@ -322,7 +338,8 @@ Scripts:
 | `npm run cli -- <command>` | `migrate`, `create-user`, `create-token`, `revoke-token` (see `npm run cli -- help`) |
 
 Layout: `src/db` (pool, migration runner, `withTransaction`), `src/plugins` (db, auth, error
-handling), `src/routes`, `src/lib` (principal/roles, errors, tokens, users, batch audit),
+handling), `src/routes` (`scholarly/` for persons, works, sources, texts), `src/lib` (principal/roles,
+errors, tokens, users, batch audit, `pagination.ts` keyset cursors, `sql.ts` whitelisted INSERT/UPDATE builders),
 `migrations/` (SQL), `sql/roles.sql` (ops), `test/` (`helpers.ts` is the shared test toolkit).
 
 ### Database roles (`sql/roles.sql`)
