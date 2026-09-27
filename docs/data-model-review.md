@@ -2,6 +2,22 @@
 
 Status: proposal / review of the model in `README.md`. Nothing here is implemented yet.
 
+## Decisions recorded
+
+- **Contemporary preachers (2026-09-27):** sermons are included on the basis of
+  fair use, and storing preachers' names in `person` is allowed. Preacher names are
+  research-subject data, not account PII. The "no PII in domain tables" rule applies
+  to *user account* data only.
+  Open points that this decision doesn't cover:
+  - "Fair use" is a US copyright doctrine. Under Finnish/EU law the equivalent
+    basis is the text-and-data-mining and quotation exceptions (DSM Directive
+    Art. 3/4 as implemented in the Finnish Copyright Act). Check that the
+    documented basis names the right regime.
+  - Mining exceptions cover analysis, not redistribution. `access_level` stays,
+    so the API doesn't serve full sermon texts to arbitrary callers.
+  - Sermon *content* may still mention third parties (funeral, baptism and
+    wedding sermons). A redaction or restriction rule for those is still needed.
+
 This document critically reviews the proposed Sermonize data model and recommends
 the **minimum robust model**: one that preserves scholarly provenance and keeps
 future semantic research possible, without turning the API into an AI-processing
@@ -41,9 +57,9 @@ Priorities are marked:
 9. **Noise points and the clustering input set aren't recorded.** Without the
    denominator you can't answer "what share of Augustine's chunks fall in cluster 12".
 10. **`status: proposed | reviewed` doesn't say *what* the review decided, or who made it.**
-11. **Contemporary sermon authors are living people.** `Author.name` is personal data
-    in a domain table, which contradicts the "no PII in domain tables" rule. Sermon text
-    may also contain third-party and special-category data (religion, health).
+11. ~~Contemporary sermon authors are living people.~~ *Decided:* preacher names
+    may be stored (see Decisions). Still open: third-party personal data *inside*
+    sermon text (religion, health).
 12. **Pseudonymous IDs are still personal data under GDPR** (Recital 26). The privacy
     design is sound, but the documentation shouldn't say domain tables are PII-free
     in the legal sense.
@@ -108,10 +124,9 @@ editors, and "author" becomes a role rather than a type.
 - **"The Text body is stable."** Corrections happen. Offsets and every downstream
   record depend on the exact body, so the body must be immutable once a segmentation
   exists. A correction is a new Text that points back with `supersedes_text_id`.
-- **"Domain tables contain no PII."** True for account data only. Person records for
-  living preachers, and the sermon texts themselves, contain personal data. That is
-  research-subject data and needs its own documented legal basis and policy
-  (GDPR Art. 89 research safeguards, Finnish Data Protection Act 1050/2018).
+- **"Domain tables contain no PII."** True for account data only. Preacher names in
+  `person` are allowed by decision (see Decisions). Personal data about third
+  parties inside sermon texts still needs a policy.
 - **"A `user_hash` is needed for pseudonymisation."** A random UUID primary key is
   already a pseudonym. A deterministic HMAC of an email adds risk (the key can leak,
   and emails change) and no benefit. Drop `user_hash`.
@@ -320,10 +335,9 @@ schema public (role: api_app)
 - Document that pseudonymous IDs are still personal data. Erasure = delete the
   `private` rows. The UUIDs then become effectively anonymous, and audit rows stay.
   State retention periods.
-- **Research-subject data** (living preachers in `person`, personal data inside
-  sermon texts) is a separate policy from account PII. It needs a lawful basis,
-  preacher consent or licence for inclusion, a redaction rule for third parties
-  (funeral and baptism sermons!), and `access_level` restrictions.
+- **Research-subject data** is separate from account PII. Preacher names are
+  allowed (see Decisions). Personal data about third parties inside sermon texts
+  (funeral and baptism sermons!) still needs a redaction or `access_level` rule.
 
 ---
 
@@ -489,7 +503,8 @@ public:  app_user (uuid)
 8. Make labels immutable with **label_review** decisions, and add `producer_kind`.
 9. Drop `user_hash`. Add **service principals**, a **private schema** for auth
    identity + PII, and an **append-only audit_event**.
-10. Write down the **research-subject personal data policy** for living preachers and sermon content.
+10. Write down the rule for **third-party personal data inside sermon texts**
+    (preacher names: decided, see Decisions).
 
 # D. Assumptions to document before implementation
 
@@ -503,8 +518,9 @@ public:  app_user (uuid)
 7. Labels are descriptive research metadata. Review ≠ doctrinal endorsement.
 8. Licensing and access: who may read restricted text, and whether chunks and
    embeddings of restricted text inherit the restriction (recommended: yes).
-9. Living-person and sermon-content data policy: lawful basis, consent/licence,
-   redaction, retention.
+9. Sermon inclusion basis (decided: fair use / text-and-data-mining; preacher names
+   allowed). Still to document: the precise legal basis under Finnish/EU law, and
+   redaction of third-party data in sermon content.
 10. Pseudonymous user IDs are personal data. How erasure and audit retention interact.
 11. Service-account attribution: who is `created_by` for script-ingested data.
 12. Deletion semantics: withdraw, don't delete. `RESTRICT` on all provenance FKs.
