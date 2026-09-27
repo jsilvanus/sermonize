@@ -10,8 +10,10 @@ export interface AuthConfig {
   registrationOpen: boolean;
   /** Role of self-registered users: reader (default) or contributor. */
   registrationDefaultRole: SelfRegistrationRole;
-  /** Lifetime of tokens issued by POST /auth/login, in hours. */
+  /** Lifetime of tokens issued by POST /auth/login for the web UI (`client: 'web'`, the default), in hours. */
   loginTokenTtlHours: number;
+  /** Lifetime of tokens issued by POST /auth/login for the MCP server (`client: 'mcp'`), in hours. */
+  mcpLoginTokenTtlHours: number;
   /** Per-IP limit on POST /auth/register and /auth/login; null disables it. */
   rateLimit: { max: number; timeWindowMs: number } | null;
 }
@@ -63,6 +65,7 @@ export function loadAuthConfig(env: NodeJS.ProcessEnv = process.env): AuthConfig
     registrationOpen: boolFromEnv(env, 'REGISTRATION_OPEN', false),
     registrationDefaultRole: parseRegistrationRole(env.REGISTRATION_DEFAULT_ROLE),
     loginTokenTtlHours: intFromEnv(env, 'LOGIN_TOKEN_TTL_HOURS', 12),
+    mcpLoginTokenTtlHours: intFromEnv(env, 'MCP_LOGIN_TOKEN_TTL_HOURS', 720),
     rateLimit:
       max === 0 ? null : { max, timeWindowMs: intFromEnv(env, 'AUTH_RATE_LIMIT_WINDOW_SECONDS', 60) * 1000 },
   };

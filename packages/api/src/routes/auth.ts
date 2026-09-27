@@ -28,9 +28,22 @@ const RegisterBody = Type.Object({
   display_name: Type.Optional(Type.String({ minLength: 1, maxLength: 200 })),
 });
 
+/** Which client asks for the login token: its name and lifetime depend on it. */
+export type LoginClient = 'web' | 'mcp';
+
 const LoginBody = Type.Object({
   email: Type.String({ minLength: 1, maxLength: 320 }),
   password: Password,
+  client: Type.Optional(
+    Type.Union(
+      [Type.Literal('web'), Type.Literal('mcp')],
+      {
+        description:
+          "Who asks for the token (default 'web'). The token is named after it and expires after " +
+          'LOGIN_TOKEN_TTL_HOURS (web) or MCP_LOGIN_TOKEN_TTL_HOURS (mcp).',
+      },
+    ),
+  ),
 });
 
 const authErrors = { ...errorResponses, 429: ErrorResponse };
@@ -39,7 +52,7 @@ const authErrors = { ...errorResponses, 429: ErrorResponse };
  * Self-service password accounts (migration 0003):
  *   GET  /auth/config    public: whether registration is open, password rules
  *   POST /auth/register  public, REGISTRATION_OPEN only: creates a human user with REGISTRATION_DEFAULT_ROLE
- *   POST /auth/login     public: email + password -> expiring API token named "login"
+ *   POST /auth/login     public: email + password (+ client web|mcp) -> expiring API token named after the client
  *   POST /auth/logout    authenticated: revokes the token used for the request
  * PII (email, display name) and the password hash stay in the private schema.
  */
@@ -126,6 +139,7 @@ export const authRoutes: FastifyPluginAsyncTypebox<{ auth: AuthConfig }> = async
     },
     async (request) => {
       const { password } = request.body;
+      const client: LoginClient = request.body.client ?? 'web';
       const { rows } = await app.pg.query<{
         user_id: string;
         password_hash: string;
@@ -143,10 +157,11 @@ export const authRoutes: FastifyPluginAsyncTypebox<{ auth: AuthConfig }> = async
       if (!ok || cred.status !== 'active') throw invalidCredentials();
 
       const token = generateToken();
-      const expiresAt = new Date(Date.now() + auth.loginTokenTtlHours * 3_600_000);
+      const ttlHours = client === 'mcp' ? auth.mcpLoginTokenTtlHours : auth.loginTokenTtlHours;
+      const expiresAt = new Date(Date.now() + ttlHours * 3_600_000);
       try {
-        await withTransaction(app.pg, null, request.id, (client) =>
-          client.query('SELECT private.create_login_token($1, $2, $3)', [cred.user_id, hashToken(token), expiresAt]),
+        await withTransaction(app.pg, null, request.id, (db) =>
+          db.query('SELECT private.create_login_token($1, $2, $3, $4)', [cred.user_id, hashToken(token), expiresAt, client]),
         );
       } catch (err) {
         // Disabled between the lookup and now.

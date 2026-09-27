@@ -61,6 +61,11 @@ describe('password accounts', () => {
       expect(loadAuthConfig({ REGISTRATION_OPEN: 'true' }).registrationOpen).toBe(true);
       expect(loadAuthConfig({ LOGIN_TOKEN_TTL_HOURS: '2' }).loginTokenTtlHours).toBe(2);
       expect(() => loadAuthConfig({ LOGIN_TOKEN_TTL_HOURS: '0' })).toThrow();
+      expect(loadAuthConfig({}).mcpLoginTokenTtlHours).toBe(720);
+      expect(loadAuthConfig({ MCP_LOGIN_TOKEN_TTL_HOURS: '48' }).mcpLoginTokenTtlHours).toBe(48);
+      for (const bad of ['0', '-1', '1.5', 'x']) {
+        expect(() => loadAuthConfig({ MCP_LOGIN_TOKEN_TTL_HOURS: bad })).toThrow(/MCP_LOGIN_TOKEN_TTL_HOURS/);
+      }
       expect(loadAuthConfig({}).rateLimit).toEqual({ max: 10, timeWindowMs: 60_000 });
       expect(loadAuthConfig({ AUTH_RATE_LIMIT_MAX: '0' }).rateLimit).toBeNull();
     });
@@ -71,6 +76,7 @@ describe('password accounts', () => {
         await expect(
           buildApp({ pool, auth: { registrationDefaultRole: 'admin' as unknown as 'reader' } }),
         ).rejects.toThrow(/REGISTRATION_DEFAULT_ROLE/);
+        await expect(buildApp({ pool, auth: { mcpLoginTokenTtlHours: 0 } })).rejects.toThrow(/mcpLoginTokenTtlHours/);
       } finally {
         await pool.end();
       }
@@ -161,7 +167,50 @@ describe('password accounts', () => {
         'SELECT name, created_by, expires_at FROM private.api_token WHERE token_sha256 = $1',
         [hashToken(body.token)],
       );
-      expect(rows[0]).toMatchObject({ name: 'login', created_by: user_id });
+      expect(rows[0]).toMatchObject({ name: 'web', created_by: user_id });
+    });
+
+    it("client 'mcp' gets a token named mcp with MCP_LOGIN_TOKEN_TTL_HOURS (default 30 days)", async () => {
+      const { email, user_id } = await registered();
+      const before = Date.now();
+      const res = await api(open.app, null, { method: 'POST', url: '/auth/login', payload: { email, password: PASSWORD, client: 'mcp' } });
+      expect(res.statusCode, res.body).toBe(200);
+      const body = res.json();
+      expect(body).toMatchObject({ user_id, role: 'reader' });
+      const expires = Date.parse(body.expires_at);
+      expect(expires).toBeGreaterThanOrEqual(before + 720 * 3_600_000 - 1000);
+      expect(expires).toBeLessThanOrEqual(Date.now() + 720 * 3_600_000 + 1000);
+      expect((await api(open.app, body.token, { method: 'GET', url: '/me' })).statusCode).toBe(200);
+      const { rows } = await open.pool.query('SELECT name FROM private.api_token WHERE token_sha256 = $1', [hashToken(body.token)]);
+      expect(rows[0].name).toBe('mcp');
+      const audit = await open.pool.query(
+        `SELECT changes FROM audit_event WHERE action = 'token_create' AND actor_id = $1`,
+        [user_id],
+      );
+      expect(audit.rows.map((r) => r.changes)).toEqual([expect.objectContaining({ via: 'login', client: 'mcp' })]);
+
+      // Explicit 'web' is the default; anything else is a validation error.
+      const web = await api(open.app, null, { method: 'POST', url: '/auth/login', payload: { email, password: PASSWORD, client: 'web' } });
+      expect(web.statusCode).toBe(200);
+      expect(Math.abs(Date.parse(web.json().expires_at) - (Date.now() + 12 * 3_600_000))).toBeLessThan(5000);
+      const bad = await api(open.app, null, { method: 'POST', url: '/auth/login', payload: { email, password: PASSWORD, client: 'cli' } });
+      expect(bad.statusCode).toBe(400);
+      expect(bad.json().error.code).toBe('validation_failed');
+    });
+
+    it('honours MCP_LOGIN_TOKEN_TTL_HOURS independently of LOGIN_TOKEN_TTL_HOURS', async () => {
+      const ctx = await setupTestApp({ auth: { loginTokenTtlHours: 1, mcpLoginTokenTtlHours: 3 } });
+      try {
+        const { email } = await registered();
+        const ttl = async (client: string) => {
+          const res = await api(ctx.app, null, { method: 'POST', url: '/auth/login', payload: { email, password: PASSWORD, client } });
+          return Date.parse(res.json().expires_at) - Date.now();
+        };
+        expect(Math.abs((await ttl('web')) - 3_600_000)).toBeLessThan(5000);
+        expect(Math.abs((await ttl('mcp')) - 3 * 3_600_000)).toBeLessThan(5000);
+      } finally {
+        await ctx.close();
+      }
     });
 
     it('honours LOGIN_TOKEN_TTL_HOURS', async () => {
