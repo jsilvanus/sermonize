@@ -22,6 +22,8 @@ sermonize/
     ├── api/                @sermonize/api: the REST API (this README)
     │   ├── src/  test/  migrations/  sql/roles.sql
     │   └── package.json
+    ├── cli/                @sermonize/cli: `sermonize-admin`, user/token administration over the REST API
+    │   └── README.md       see packages/cli/README.md
     ├── mcp/                @sermonize/mcp: thin MCP server that relays to the REST API
     │   └── README.md       see packages/mcp/README.md
     └── web/                @sermonize/web: minimal server-rendered web UI over the REST API
@@ -37,6 +39,9 @@ sermonize/
 - **`@sermonize/web`** is a small server-rendered web UI (no client JavaScript): corpus counts,
   registration, sign-in, account and sign-out. It also talks only to the REST API over HTTP and keeps
   the user's API token in a signed httpOnly cookie. See [`packages/web/README.md`](packages/web/README.md).
+- **`@sermonize/cli`** is `sermonize-admin`, the day-to-day admin tool for users and tokens. It talks only
+  to the REST API over HTTP (sign in with `sermonize-admin login`). See [`packages/cli/README.md`](packages/cli/README.md)
+  and [User management](#user-management) below.
 
 Root scripts (run from the repository root):
 
@@ -46,7 +51,8 @@ Root scripts (run from the repository root):
 | `npm run typecheck` / `npm run build` / `npm test` | runs the workspace script in every package, one package after another |
 | `npm run dev:api` / `npm run dev:mcp` / `npm run dev:web` | API (port 3000) / MCP server (port 5999) / web UI (port 3100) with reload |
 | `npm run migrate` | apply API migrations to `DATABASE_URL` |
-| `npm run cli -- <command>` | the API admin CLI (see below) |
+| `npm run cli -- <command>` | the API's database CLI for bootstrap and operations (see below) |
+| `npm run admin -- <command>` | `sermonize-admin`, user management over HTTP (see [User management](#user-management)) |
 
 A single package can be targeted with `-w`, e.g. `npm test -w @sermonize/api`.
 
@@ -63,6 +69,8 @@ stores or hashes passwords, both call the API's `POST /auth/login`.
  MCP client -> @sermonize/mcp ---- POST /auth/login {client:"mcp"} -> @sermonize/api
    (OAuth)      (grant -> encrypted token)                            ^   (users, roles,
                                                                       |    tokens, audit)
+ admin -----> sermonize-admin ---- POST /auth/login {client:"cli"} ---+
+                (~/.config/sermonize/credentials.json, 0600)          |
  scripts ------------------ Authorization: Bearer <token> ------------+
 ```
 
@@ -73,16 +81,49 @@ API token kinds (all are rows of `private.api_token`, stored as SHA-256 hashes, 
 |---|---|---|---|
 | web session | `web` | `POST /auth/login` (default `client: "web"`), via the web sign-in form | `LOGIN_TOKEN_TTL_HOURS` (12 h); revoked at sign-out |
 | MCP grant | `mcp` | `POST /auth/login` with `client: "mcp"`, via the MCP OAuth sign-in page | `MCP_LOGIN_TOKEN_TTL_HOURS` (720 h = 30 days); revoked when the OAuth grant ends |
-| script / service | chosen by the admin | `npm run cli -- create-token` or `POST /admin/users/:id/tokens` | chosen by the admin (may be unlimited) |
+| admin CLI | `cli` | `sermonize-admin login` (`POST /auth/login` with `client: "cli"`, since `0005`) | `CLI_LOGIN_TOKEN_TTL_HOURS` (12 h); revoked by `sermonize-admin logout` |
+| script / service | chosen by the admin | `sermonize-admin tokens create`, `npm run cli -- create-token` or `POST /admin/users/:id/tokens` | chosen by the admin (may be unlimited) |
 | (before `0004`) | `login` | `POST /auth/login` | `LOGIN_TOKEN_TTL_HOURS` |
 
 Roles (`reader < contributor < curator < admin`) belong to the account, so a user has the same permissions in
 the web UI, through MCP tools and with scripts. Disabling a user or revoking a token takes effect at once
 everywhere; the MCP server then asks the client to sign in again.
 
+Self-registration only ever gives `reader` (or `contributor`, see `REGISTRATION_DEFAULT_ROLE`); curators and
+admins are promoted by an admin with `sermonize-admin users set-role <user-id> curator|admin`.
+
 Rate limiting of register/login is per client IP in the API. The web app and the MCP server forward the end user's
 IP as `X-Forwarded-For`, so the API's `TRUST_PROXY` must list the hosts they run on (and nginx, if it talks to the
 API directly); each of them has its own `TRUST_PROXY` for the proxy in front of it.
+
+## User management
+
+Two tools, split by purpose:
+
+| tool | talks to | use it for |
+|---|---|---|
+| `npm run cli -- …` (`packages/api/src/cli.ts`) | PostgreSQL directly (`DATABASE_URL`), as the fixed system user | bootstrap and operations: migrations, **the first admin**, emergency tokens, vector indexes |
+| `sermonize-admin …` (`packages/cli`, `npm run admin -- …`) | the REST API over HTTP (`SERMONIZE_API_URL`), with your own admin account | day-to-day: list/find users, create users, change roles, disable/enable, set passwords, issue/revoke tokens |
+
+Bootstrap once, then work over HTTP:
+
+```sh
+npm run migrate
+read -rs PW && printf '%s\n' "$PW" | npm run --silent cli -- create-user --kind human --role admin \
+  --email you@example.org --password-stdin          # prints the new admin's id
+export SERMONIZE_API_URL=https://api.example.org    # default http://127.0.0.1:3000
+npm run admin -- login --email you@example.org      # hidden password prompt; token saved with mode 0600
+npm run admin -- users list --role admin
+npm run admin -- users set-role <user-id> curator
+npm run admin -- users disable <user-id>            # takes effect at once: its tokens stop resolving
+npm run admin -- tokens create <service-user-id> --name embeddings --expires-at 2027-01-01T00:00:00Z
+```
+
+`sermonize-admin` never accepts passwords as arguments (hidden prompt or `--password-stdin` only), prints
+tables by default and JSON with `--json`, and exits 0 (ok), 1 (API or usage error) or 2 (not signed in / not
+allowed). The API refuses to let an admin demote or disable themself, to demote or disable the last active
+admin, and to change the system user (409 `conflict` with `details.reason` = `self`, `last_admin`,
+`system_user`); the CLI explains these. See [`packages/cli/README.md`](packages/cli/README.md).
 
 ## Architecture
 
@@ -313,7 +354,9 @@ Access level covers derived data too: chunks and embeddings of restricted texts 
 
 **audit_event**
 - id, occurred_at, actor_id, action (`insert | update | delete | withdraw | batch_insert | status_change |
-  token_create | token_revoke | pii_update | password_set`; `delete` only for the replaceable join tables),
+  token_create | token_revoke | pii_update | password_set | pii_read`; `delete` only for the replaceable join tables;
+  `pii_read` (since `0005`) records that an admin listed accounts with their PII: the number of rows and the filter
+  names, never the search text or the values),
   entity_type, entity_id NULL, batch_count NULL, request_id, changes jsonb
 - Row-level for curated tables. One event per batch for bulk derived data (chunks, embeddings, clusters,
   memberships). INSERT-only. Never contains values from `private`.
@@ -453,11 +496,31 @@ Clustering, label and provenance details (added in Phase 4):
 - `GET /clusters/:id/provenance` → `{ cluster, run, embedding_space, input: { size, noise_count, cluster_count }, labels }`
   with the run's algorithm, parameters, producer and status, and every label with its reviews.
 
-Admin:
+Admin (all need `admin`; used by `sermonize-admin`):
 - `POST /admin/users`, `POST /admin/users/:id/tokens`, `DELETE /admin/tokens/:id`
   (since `0003`, an email already used by another account, case-insensitively, is a 409 `conflict`)
 - CLI: `npm run cli -- create-user`, `create-token`, `revoke-token`, `migrate`, `create-index <embedding_space_id>`,
   `drop-index <embedding_space_id>`
+
+Account administration (added with `@sermonize/cli`, migration `0005_admin_user_management`). Admins manage accounts,
+so these responses include the account PII (`email`, `display_name`), read through the SECURITY DEFINER function
+`private.admin_list_users` (which checks for an active admin and writes a `pii_read` audit event). Password hashes and
+token hashes are never returned; a token's plaintext only once, when it is created.
+- `GET /admin/users?role=&status=&kind=&q=&cursor=&limit=` → `{ items: [{ id, kind, role, status, email, display_name,
+  has_password, created_at, updated_at }], next_cursor }`, ordered by `(created_at, id)`. `q` is a case-insensitive
+  substring of email or display name (LIKE wildcards are literal).
+- `GET /admin/users/:id` → the same fields plus `tokens: { total, active, expired, revoked }`.
+- `PATCH /admin/users/:id` `{ role?, status?, email?, display_name? }` (at least one; `display_name: null` clears it) →
+  the admin view. Role/status changes are row-audited (`update app_user`, old/new values), PII changes as `pii_update`
+  with field names only. 409 `conflict` with `details.reason`: `self` (an admin demoting or disabling their own account),
+  `last_admin` (demoting or disabling the last active admin, not counting the system user), `system_user` (the fixed
+  system user cannot be changed). Disabling takes effect at once: tokens of disabled users no longer resolve and login fails.
+- `PUT /admin/users/:id/password` `{ password, revoke_tokens? }` → `{ user_id, revoked_tokens }`. Same length rule as
+  registration (12–256 code points, else 400); argon2id in Node; 422 for service accounts and users without an email.
+  Audited as `password_set` (`{ via: "admin", revoke_tokens }`, no values) plus one `token_revoke` (`via: "password_set"`) per revoked token.
+- `POST /admin/users` also accepts `password` (human users with `email` only, else 422).
+- `GET /admin/users/:id/tokens` → `{ items: [{ id, name, created_by, created_at, expires_at, revoked_at, state }] }`
+  (`state`: `active | expired | revoked`). Last use is not tracked.
 
 Password accounts and statistics (added with `@sermonize/web`, migration `0003_password_auth`):
 - `GET /auth/config` (public) → `{ registration_open, password_min_length: 12, password_max_length: 256 }`.
@@ -467,7 +530,8 @@ Password accounts and statistics (added with `@sermonize/web`, migration `0003_p
   Creates an active `human` user with `REGISTRATION_DEFAULT_ROLE`, its `user_pii` and an argon2id `password_credential`.
 - `POST /auth/login` (public) `{ email, password, client? }` → `{ token, expires_at, user_id, role }`: a new API
   token named after `client` — `"web"` (default) expiring after `LOGIN_TOKEN_TTL_HOURS` (default 12), or `"mcp"`
-  (used by `@sermonize/mcp`) expiring after `MCP_LOGIN_TOKEN_TTL_HOURS` (default 720 = 30 days); any other value
+  (used by `@sermonize/mcp`) expiring after `MCP_LOGIN_TOKEN_TTL_HOURS` (default 720 = 30 days), or `"cli"` (since
+  `0005`, used by `sermonize-admin login`) expiring after `CLI_LOGIN_TOKEN_TTL_HOURS` (default 12); any other value
   is a 400. (Tokens issued before migration `0004` are named `login`.) Every failure (unknown email, wrong password,
   disabled user, user without a password) is the same 401 `invalid_credentials`; unknown emails still run an
   argon2 verification against a dummy hash, and the status is checked only after verification.
@@ -516,8 +580,10 @@ npm install                     # at the repository root (all workspaces)
 cp packages/api/.env.example packages/api/.env   # then export the variables (the app reads process.env only)
 export DATABASE_URL=postgres://sermonize:sermonize@localhost:5432/sermonize
 npm run migrate                 # applies packages/api/migrations/*.sql (recorded in schema_migrations)
-npm run cli -- create-user --kind human --role admin --email you@example.org   # prints the user id
+read -rs PW && printf '%s\n' "$PW" | npm run --silent cli -- create-user --kind human --role admin \
+  --email you@example.org --password-stdin                                     # prints the user id
 npm run cli -- create-token --user <user-id> --name laptop                     # prints the token once
+# or, with the API running: npm run admin -- login --email you@example.org
 npm run dev:api                 # http://127.0.0.1:3000/health
 curl -H "Authorization: Bearer <token>" http://127.0.0.1:3000/me
 ```
@@ -528,7 +594,7 @@ which migration `0001_init` creates for bootstrapping.
 Environment: `DATABASE_URL`, `TEST_DATABASE_URL`, `PORT` (3000), `HOST` (127.0.0.1),
 `LOG_LEVEL` (info), `MAX_BATCH_ITEMS` (5000), `TRUST_PROXY` (false; `true` or comma-separated proxy addresses/CIDRs),
 `REGISTRATION_OPEN` (false), `REGISTRATION_DEFAULT_ROLE` (reader; only `reader`/`contributor`),
-`LOGIN_TOKEN_TTL_HOURS` (12, web sign-in), `MCP_LOGIN_TOKEN_TTL_HOURS` (720, MCP sign-in), `AUTH_RATE_LIMIT_MAX` (10; 0 disables), `AUTH_RATE_LIMIT_WINDOW_SECONDS` (60).
+`LOGIN_TOKEN_TTL_HOURS` (12, web sign-in), `MCP_LOGIN_TOKEN_TTL_HOURS` (720, MCP sign-in), `CLI_LOGIN_TOKEN_TTL_HOURS` (12, `sermonize-admin login`), `AUTH_RATE_LIMIT_MAX` (10; 0 disables), `AUTH_RATE_LIMIT_WINDOW_SECONDS` (60).
 Invalid values stop the server at startup.
 
 Scripts of `packages/api` (run them there, with `-w @sermonize/api` from the root, or via the root scripts above):
@@ -538,9 +604,9 @@ Scripts of `packages/api` (run them there, with `-w @sermonize/api` from the roo
 | `npm run dev` | API with reload (tsx watch) |
 | `npm run build` / `npm start` | compile to `dist/` / run the compiled server |
 | `npm run typecheck` | `tsc --noEmit` over `src/` and `test/` |
-| `npm test` | vitest (in `packages/api`) against `TEST_DATABASE_URL` (default `postgres://sermonize:sermonize@localhost:5432/sermonize_test`). **Drops and recreates the `public` and `private` schemas** of that database once per run, then applies all migrations. Test files run one at a time. The MCP and web packages' tests use the same database without resetting it (they only apply pending migrations and use unique data); the root `npm test` runs the suites one after another (api, mcp, web). |
+| `npm test` | vitest (in `packages/api`) against `TEST_DATABASE_URL` (default `postgres://sermonize:sermonize@localhost:5432/sermonize_test`). **Drops and recreates the `public` and `private` schemas** of that database once per run, then applies all migrations. Test files run one at a time. The MCP and web packages' tests use the same database without resetting it (they only apply pending migrations and use unique data); the root `npm test` runs the suites one after another (api, cli, mcp, web). |
 | `npm run migrate` | apply pending migrations to `DATABASE_URL` |
-| `npm run cli -- <command>` | `migrate`, `create-user`, `create-token`, `revoke-token`, `create-index`, `drop-index` (see `npm run cli -- help`) |
+| `npm run cli -- <command>` | `migrate`, `create-user` (`--password-stdin` for a first admin who can sign in), `create-token`, `revoke-token`, `create-index`, `drop-index` (see `npm run cli -- help`) |
 
 Layout (under `packages/api/`): `src/db` (pool, migration runner, `withTransaction`), `src/plugins` (db, auth, error
 handling, OpenAPI), `src/routes` (`scholarly/` for persons, works, sources, texts; `derived/` for segmentations, chunks,
@@ -557,7 +623,8 @@ and grants it: `SELECT/INSERT/UPDATE` on public tables (immutability is enforced
 `DELETE` only on `work_person`, `text_person` and `sermon_occasion`, `SELECT/INSERT` only on
 `audit_event`, and no table privileges in `private` (only `EXECUTE` on the `SECURITY DEFINER`
 functions `private.resolve_token`, `create_api_token`, `revoke_api_token`, `set_user_pii`, and since `0003`
-`register_user`, `get_password_credential`, `create_login_token`, `revoke_own_token`). The admin functions check for
+`register_user`, `get_password_credential`, `create_login_token`, `revoke_own_token`, and since `0005`
+`admin_list_users`, `admin_list_tokens`, `admin_update_user_pii`, `admin_set_password`, which require an active admin). The admin functions check for
 an active admin principal; the `0003` ones need none but each does one narrow thing (register only readers/contributors;
 look up a credential; store a `web` or `mcp` login token (since `0004`; `login` before) with a future expiry for an
 active user with a password; revoke the
@@ -594,6 +661,11 @@ Migration `0004_login_token_client` replaces `private.create_login_token(uuid, t
 `create_login_token(uuid, text, timestamptz, text)`: the last argument is the client (`web` or `mcp`), which becomes
 the token name and is recorded in the `token_create` audit event. It re-grants `EXECUTE` to `sermonize_app` when that
 role exists, so a running deployment keeps working before `roles.sql` is re-run (which lists the new signature).
+
+Migration `0005_admin_user_management` adds the admin functions behind `GET/PATCH /admin/users…`, `PUT
+/admin/users/:id/password` and `GET /admin/users/:id/tokens` (see the API section), and lets `create_login_token`
+accept the client `cli`. It grants `EXECUTE` on the new functions to `sermonize_app` when that role exists; re-run
+`roles.sql` anyway.
 
 ## Explicit non-goals for v1
 

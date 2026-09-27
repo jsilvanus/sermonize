@@ -17,7 +17,8 @@
     "dev:mcp": "npm run dev -w @sermonize/mcp",
     "dev:web": "npm run dev -w @sermonize/web",
     "migrate": "npm run migrate -w @sermonize/api",
-    "cli": "npm run --silent cli -w @sermonize/api --"
+    "cli": "npm run --silent cli -w @sermonize/api --",
+    "admin": "npm run --silent admin -w @sermonize/cli --"
   },
   "devDependencies": {
     "@types/node": "^22.20.4",

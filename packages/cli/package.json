@@ -1,0 +1,25 @@
+{
+  "name": "@sermonize/cli",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "sermonize-admin: user and token administration over the Sermonize REST API.",
+  "engines": {
+    "node": ">=22.12"
+  },
+  "bin": {
+    "sermonize-admin": "dist/index.js"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json && node -e \"require('node:fs').chmodSync('dist/index.js', 0o755)\"",
+    "typecheck": "tsc --noEmit && tsc --noEmit -p test",
+    "admin": "tsx src/index.ts",
+    "start": "node dist/index.js",
+    "test": "vitest run"
+  },
+  "devDependencies": {
+    "@sermonize/api": "0.1.0",
+    "@types/pg": "^8.23.1",
+    "pg": "^8.23.0"
+  }
+}
