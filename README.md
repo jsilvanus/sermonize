@@ -200,7 +200,7 @@ schema private  (no privileges for the application role)
   user_pii(user_id, email, display_name, …)
 
 schema public
-  app_user(id uuid, kind human|service, role, status, created_at, updated_at)
+  app_user(id uuid, kind human|service, role, status active|disabled, created_*, updated_*)
   audit_event (append-only)
 ```
 
@@ -229,7 +229,8 @@ Access level covers derived data too: chunks and embeddings of restricted texts 
 (embeddings can be partially inverted).
 
 **audit_event**
-- id, occurred_at, actor_id, action (`insert | update | withdraw | batch_insert | status_change | …`),
+- id, occurred_at, actor_id, action (`insert | update | delete | withdraw | batch_insert | status_change |
+  token_create | token_revoke | pii_update`; `delete` only for the replaceable join tables),
   entity_type, entity_id NULL, batch_count NULL, request_id, changes jsonb
 - Row-level for curated tables. One event per batch for bulk derived data (chunks, embeddings,
   memberships). INSERT-only. Never contains values from `private`.
@@ -272,7 +273,11 @@ Derived (batch endpoints accept up to 5,000 items and are idempotent on natural 
 
 Admin:
 - `POST /admin/users`, `POST /admin/users/:id/tokens`, `DELETE /admin/tokens/:id`
-- CLI: `npm run cli -- create-user`, `npm run cli -- create-index <embedding_space_id>`
+- CLI: `npm run cli -- create-user`, `create-token`, `revoke-token`, `migrate`, `create-index <embedding_space_id>`
+
+Other:
+- `GET /health` (the only unauthenticated route), `GET /me` (the caller's own user id, role and kind;
+  added in Phase 1 so that scripts can check a token without needing any particular role)
 
 ### Semantic search
 
@@ -283,6 +288,69 @@ query embedding. The caller is responsible for producing it in the same space (i
 
 Vector indexes are per embedding space (partial HNSW expression indexes, `halfvec` above
 2,000 dimensions), created by an operator via the CLI, not through the public API.
+
+## Development
+
+Requirements: Node.js ≥ 22.12, PostgreSQL ≥ 16 with pgvector ≥ 0.8.
+
+```sh
+npm install
+cp .env.example .env            # then export the variables (the app reads process.env only)
+export DATABASE_URL=postgres://sermonize:sermonize@localhost:5432/sermonize
+npm run migrate                 # applies migrations/*.sql (recorded in schema_migrations)
+npm run cli -- create-user --kind human --role admin --email you@example.org   # prints the user id
+npm run cli -- create-token --user <user-id> --name laptop                     # prints the token once
+npm run dev                     # http://127.0.0.1:3000/health
+curl -H "Authorization: Bearer <token>" http://127.0.0.1:3000/me
+```
+
+The CLI writes as the fixed system user `00000000-0000-7000-8000-000000000000` (service, admin),
+which migration `0001_init` creates for bootstrapping.
+
+Environment: `DATABASE_URL`, `TEST_DATABASE_URL`, `PORT` (3000), `HOST` (127.0.0.1),
+`LOG_LEVEL` (info), `MAX_BATCH_ITEMS` (5000).
+
+Scripts:
+
+| script | does |
+|---|---|
+| `npm run dev` | API with reload (tsx watch) |
+| `npm run build` / `npm start` | compile to `dist/` / run the compiled server |
+| `npm run typecheck` | `tsc --noEmit` over `src/` and `test/` |
+| `npm test` | vitest against `TEST_DATABASE_URL` (default `postgres://sermonize:sermonize@localhost:5432/sermonize_test`). **Drops and recreates the `public` and `private` schemas** of that database once per run, then applies all migrations. Test files run one at a time. |
+| `npm run migrate` | apply pending migrations to `DATABASE_URL` |
+| `npm run cli -- <command>` | `migrate`, `create-user`, `create-token`, `revoke-token` (see `npm run cli -- help`) |
+
+Layout: `src/db` (pool, migration runner, `withTransaction`), `src/plugins` (db, auth, error
+handling), `src/routes`, `src/lib` (principal/roles, errors, tokens, users, batch audit),
+`migrations/` (SQL), `sql/roles.sql` (ops), `test/` (`helpers.ts` is the shared test toolkit).
+
+### Database roles (`sql/roles.sql`)
+
+Migrations run as the schema owner. The API should connect as a separate, least-privileged
+role. `sql/roles.sql` is an idempotent ops script (not a migration) that creates `sermonize_app`
+and grants it: `SELECT/INSERT/UPDATE` on public tables (immutability is enforced by triggers),
+`DELETE` only on `work_person`, `text_person` and `sermon_occasion`, `SELECT/INSERT` only on
+`audit_event`, and no table privileges in `private` (only `EXECUTE` on the `SECURITY DEFINER`
+functions `private.resolve_token`, `create_api_token`, `revoke_api_token`, `set_user_pii`).
+Re-run it after every migration that adds tables or functions:
+
+```sh
+psql "$OWNER_DATABASE_URL" -v ON_ERROR_STOP=1 -f sql/roles.sql
+psql "$OWNER_DATABASE_URL" -c "ALTER ROLE sermonize_app PASSWORD '…'"
+```
+
+### Database-enforced rules
+
+Writes run through `withTransaction(pool, principal, requestId, fn)`, which sets
+`app.user_id`/`app.request_id` for the transaction. Triggers then fill `created_by`/`updated_by`/
+`withdrawn_by`/`reviewer_id` (client values are overwritten), write `audit_event` rows, and
+reject: writes without a principal, changes to `text.body`, non-NFC bodies or bodies containing
+`\r`, updates/deletes of derived rows (except withdrawal columns and `clustering_run.status`),
+deletes of withdrawable records, clusters/memberships for runs that are not `open`, vectors
+whose dimension differs from their space, and memberships whose embedding is in another space.
+Trigger errors use SQLSTATEs `SZ002` (→ 409 `immutable`), `SZ003` (→ 409 `conflict`) and
+`SZ004` (→ 422 `validation_failed`).
 
 ## Explicit non-goals for v1
 
