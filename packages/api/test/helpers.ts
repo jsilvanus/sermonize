@@ -14,7 +14,7 @@ import type { InjectOptions, LightMyRequestResponse } from 'fastify';
 import pg from 'pg';
 import type { Pool, PoolClient } from 'pg';
 import { randomUUID } from 'node:crypto';
-import { buildApp, type App } from '../src/app.js';
+import { buildApp, type App, type BuildAppOptions } from '../src/app.js';
 import { withTransaction } from '../src/db/transaction.js';
 import { SYSTEM_PRINCIPAL, type Role, type UserKind } from '../src/lib/principal.js';
 import { createUser as createAppUser, issueToken } from '../src/lib/users.js';
@@ -33,7 +33,9 @@ export function createTestPool(): Pool {
 }
 
 /** Builds the app against the test database. Call `close()` in afterAll. */
-export async function setupTestApp(opts: { maxBatchItems?: number } = {}): Promise<TestContext> {
+export async function setupTestApp(
+  opts: Pick<BuildAppOptions, 'maxBatchItems' | 'auth' | 'trustProxy'> = {},
+): Promise<TestContext> {
   const pool = createTestPool();
   const app = await buildApp({ pool, ...opts });
   return {

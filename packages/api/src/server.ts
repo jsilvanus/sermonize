@@ -4,7 +4,13 @@ import { createPool } from './db/pool.js';
 
 const config = loadConfig();
 const pool = createPool(config.databaseUrl);
-const app = await buildApp({ pool, logger: { level: config.logLevel }, maxBatchItems: config.maxBatchItems });
+const app = await buildApp({
+  pool,
+  logger: { level: config.logLevel },
+  maxBatchItems: config.maxBatchItems,
+  auth: config.auth,
+  trustProxy: config.trustProxy,
+});
 
 async function shutdown(signal: string): Promise<void> {
   app.log.info({ signal }, 'shutting down');

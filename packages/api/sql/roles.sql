@@ -47,5 +47,10 @@ GRANT EXECUTE ON FUNCTION
   private.resolve_token(text),
   private.create_api_token(uuid, text, text, timestamptz),
   private.revoke_api_token(uuid),
-  private.set_user_pii(uuid, text, text)
+  private.set_user_pii(uuid, text, text),
+  -- 0003_password_auth: self-registration, login and logout (no admin principal needed)
+  private.register_user(text, text, text, text),
+  private.get_password_credential(text),
+  private.create_login_token(uuid, text, timestamptz),
+  private.revoke_own_token(text)
 TO sermonize_app;

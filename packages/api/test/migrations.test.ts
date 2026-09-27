@@ -13,7 +13,7 @@ describe('migrations', () => {
 
   it('applied all migrations and re-running is a no-op', async () => {
     const { rows } = await pool.query('SELECT version FROM schema_migrations ORDER BY version');
-    expect(rows.map((r) => r.version)).toEqual(expect.arrayContaining(['0001_init', '0002_clustering_completion']));
+    expect(rows.map((r) => r.version)).toEqual(expect.arrayContaining(['0001_init', '0002_clustering_completion', '0003_password_auth']));
     expect(await migrate(pool)).toEqual([]);
   });
 
@@ -28,7 +28,7 @@ describe('migrations', () => {
       'public.sermon_occasion', 'public.source', 'public.text', 'public.text_person',
       'public.segmentation', 'public.chunk', 'public.embedding_space', 'public.embedding',
       'public.clustering_run', 'public.cluster', 'public.cluster_membership', 'public.label',
-      'public.label_review', 'private.auth_identity', 'private.api_token', 'private.user_pii',
+      'public.label_review', 'private.auth_identity', 'private.api_token', 'private.user_pii', 'private.password_credential',
     ]) {
       expect(names).toContain(t);
     }

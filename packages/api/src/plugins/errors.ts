@@ -40,7 +40,13 @@ export function toErrorResponse(err: unknown): { statusCode: number; body: Error
   }
   if (typeof fe.statusCode === 'number' && fe.statusCode >= 400 && fe.statusCode < 500) {
     const code: ErrorCode =
-      fe.statusCode === 401 ? 'unauthorized' : fe.statusCode === 404 ? 'not_found' : 'validation_failed';
+      fe.statusCode === 401
+        ? 'unauthorized'
+        : fe.statusCode === 404
+          ? 'not_found'
+          : fe.statusCode === 429
+            ? 'rate_limited'
+            : 'validation_failed';
     return { statusCode: fe.statusCode, body: { error: { code, message: fe.message } } };
   }
   return { statusCode: 500, body: { error: { code: 'internal_error', message: 'internal server error' } } };

@@ -8,6 +8,8 @@ declare module 'fastify' {
   interface FastifyRequest {
     /** The authenticated caller, or null for public routes called without a token. */
     principal: Principal | null;
+    /** SHA-256 of the bearer token that authenticated this request (used by POST /auth/logout). */
+    tokenSha256: string | null;
   }
   interface FastifyContextConfig {
     /** Route is reachable without authentication (GET /health and the /docs routes). */
@@ -25,19 +27,22 @@ const BEARER = /^Bearer\s+(\S+)\s*$/i;
 export const authPlugin = fp(
   async (app) => {
     app.decorateRequest('principal', null);
+    app.decorateRequest('tokenSha256', null);
 
     app.addHook('onRequest', async (request) => {
       const header = request.headers.authorization;
       if (header !== undefined) {
         const token = BEARER.exec(header)?.[1];
         if (!token) throw unauthorized('malformed Authorization header; expected "Bearer <token>"');
+        const tokenSha256 = hashToken(token);
         const { rows } = await app.pg.query<{ user_id: string; role: Role; kind: Principal['kind'] }>(
           'SELECT user_id, role, kind FROM private.resolve_token($1)',
-          [hashToken(token)],
+          [tokenSha256],
         );
         const row = rows[0];
         if (!row) throw unauthorized('invalid, expired or revoked token');
         request.principal = { userId: row.user_id, role: row.role, kind: row.kind };
+        request.tokenSha256 = tokenSha256;
       }
       if (request.principal === null && request.routeOptions.config?.public !== true) {
         throw unauthorized();

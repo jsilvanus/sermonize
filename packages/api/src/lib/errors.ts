@@ -5,6 +5,9 @@ export type ErrorCode =
   | 'not_found'
   | 'conflict'
   | 'immutable'
+  | 'registration_closed'
+  | 'invalid_credentials'
+  | 'rate_limited'
   | 'internal_error';
 
 /** An error that maps directly to the API error format `{ error: { code, message, details? } }`. */

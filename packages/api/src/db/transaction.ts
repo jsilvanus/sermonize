@@ -8,7 +8,8 @@ import type { Principal } from '../lib/principal.js';
  */
 export async function withTransaction<T>(
   pool: Pool,
-  principal: Pick<Principal, 'userId'>,
+  /** null only for the self-service auth functions, which set their own actor (see migration 0003). */
+  principal: Pick<Principal, 'userId'> | null,
   requestId: string,
   fn: (client: PoolClient) => Promise<T>,
 ): Promise<T> {
@@ -18,7 +19,7 @@ export async function withTransaction<T>(
     await client.query('BEGIN');
     await client.query(
       `SELECT set_config('app.user_id', $1, true), set_config('app.request_id', $2, true)`,
-      [principal.userId, requestId],
+      [principal?.userId ?? '', requestId],
     );
     const result = await fn(client);
     await client.query('COMMIT');

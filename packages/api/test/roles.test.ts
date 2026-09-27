@@ -34,6 +34,23 @@ describe('sql/roles.sql (sermonize_app)', () => {
     await expectPgError(client.query('SELECT * FROM private.user_pii'), '42501');
     await expectPgError(client.query('SELECT * FROM private.api_token'), '42501');
     await expectPgError(client.query('SELECT * FROM private.auth_identity'), '42501');
+    await expectPgError(client.query('SELECT * FROM private.password_credential'), '42501');
+  });
+
+  it('can self-register readers/contributors without an admin principal, but nothing more', async () => {
+    const hash = '$argon2id$v=19$m=19456,t=2,p=1$c2FsdHNhbHRzYWx0$aGFzaGhhc2hoYXNoaGFzaGhhc2hoYXNoaGFzaGhhc2g';
+    await client.query('BEGIN');
+    try {
+      const { rows } = await client.query(`SELECT private.register_user('reader', 'roles-test@example.org', null, $1) AS id`, [hash]);
+      expect(rows[0].id).toMatch(/^[0-9a-f-]{36}$/);
+      await client.query('SAVEPOINT s');
+      await expectPgError(client.query(`SELECT private.register_user('admin', 'roles-test-2@example.org', null, $1)`, [hash]), '42501');
+      await client.query('ROLLBACK TO SAVEPOINT s');
+      const cred = await client.query('SELECT user_id, role, status FROM private.get_password_credential($1)', ['ROLES-TEST@example.org']);
+      expect(cred.rows).toEqual([{ user_id: rows[0].id, role: 'reader', status: 'active' }]);
+    } finally {
+      await client.query('ROLLBACK');
+    }
   });
 
   it('can resolve tokens through the SECURITY DEFINER function', async () => {

@@ -34,7 +34,8 @@ export const openApiPlugin = fp(
           version: '1.0.0',
           description:
             'Multilingual theological-text corpus and semantic research API (data only). ' +
-            'Every route except /health and /docs requires `Authorization: Bearer <token>`. ' +
+            'Every route except /health, /docs, /stats, /auth/config, /auth/register and /auth/login ' +
+            'requires `Authorization: Bearer <token>`. ' +
             'Errors: `{ "error": { "code", "message", "details"? } }`.',
         },
         components: {
