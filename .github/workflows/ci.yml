@@ -104,7 +104,7 @@ jobs:
           done
       - name: "sermonize-migrate: role handling against PostgreSQL 16 + pgvector (tools image)"
         run: |
-          # Superuser owner, CREATEROLE owner, owner without CREATEROLE, pre-created role, owner mode, aliases.
+          # Superuser owner, CREATEROLE owner, owner without CREATEROLE, pre-created role, owner mode, unknown modes.
           docker run --rm --network host -v "$PWD/deploy/tests:/tests:ro" \
             -e TEST_PG_ADMIN_URL=postgres://sermonize:sermonize@127.0.0.1:5432/postgres \
             sermonize-tools:latest sh /tests/migrate-roles.sh

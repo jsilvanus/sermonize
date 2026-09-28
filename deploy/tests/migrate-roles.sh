@@ -152,24 +152,13 @@ check "owner mode: exits 0" ok_run
 check "logs the owner mode" has_line "SERMONIZE_APP_ROLE_MODE=owner"
 check "creates no sermonize_app" sh -c "! psql '$ADMIN_URL' -X -At -c \"SELECT 1 FROM pg_roles WHERE rolname = 'sermonize_app'\" | grep -q 1"
 
-new_case alias_managed SUPERUSER
-migrate managed "$(app_url $PW1)"
-check "alias managed: exits 0" ok_run
-check "logs the deprecation" has_line "SERMONIZE_APP_ROLE_MODE=managed is deprecated"
-check "creates sermonize_app" can_connect "$(app_url $PW1)"
-
-new_case alias_external ''
-admin -c "CREATE ROLE sermonize_app LOGIN PASSWORD '$ADMIN_PW'"
-admin -c "GRANT CONNECT ON DATABASE $DB TO sermonize_app"
-migrate external "$(app_url $ADMIN_PW)"
-check "alias external: exits 0" ok_run
-check "logs the deprecation" has_line "SERMONIZE_APP_ROLE_MODE=external is deprecated"
-check "grants only" has_line "managed outside Sermonize"
-
 new_case badmode SUPERUSER
-migrate bogus "$(app_url $PW1)"
-check "unknown mode: fails" failed_run
-check "names the valid modes" has_line "must be app or owner"
+for mode in bogus managed external; do
+  migrate "$mode" "$(app_url $PW1)"
+  check "unknown mode $mode: fails" failed_run
+  check "names the valid modes" has_line "must be app or owner (got '$mode')"
+  check "creates no sermonize_app" sh -c "! psql '$ADMIN_URL' -X -At -c \"SELECT 1 FROM pg_roles WHERE rolname = 'sermonize_app'\" | grep -q 1"
+done
 
 new_case novector ''
 admin_db "$DB" -c 'DROP EXTENSION vector'

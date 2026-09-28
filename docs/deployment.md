@@ -113,7 +113,7 @@ deploy/
 | `SERMONIZE_IMAGE_PREFIX` / `SERMONIZE_TAG` | `sermonize` / `latest` | compose | see [Images](#images-build-or-pull) |
 | `DATABASE_OWNER_URL` | required | migrate, tools, backups | the schema owner |
 | `DATABASE_APP_URL` | required | api (`DATABASE_URL`), migrate | `sermonize_app`, or the owner URL in `owner` mode |
-| `SERMONIZE_APP_ROLE_MODE` | `app` | migrate | `app` or `owner` ([roles](#database-roles); `managed`/`external` are deprecated aliases of `app`) |
+| `SERMONIZE_APP_ROLE_MODE` | `app` | migrate | `app` or `owner` ([roles](#database-roles)) |
 | `POSTGRES_PASSWORD` | bundled db only | db | owner `sermonize`; only applied when the volume is initialised |
 | `MCP_JWT_SECRET` | required | mcp (`JWT_SECRET`) | base64, ≥ 32 bytes |
 | `MCP_TOKEN_KEY` | required | mcp (`SERMONIZE_TOKEN_KEY`) | base64 of exactly 32 bytes |
@@ -169,8 +169,7 @@ runs before the API on every `docker compose up`; it is idempotent. It
   and read `private` directly, so the database no longer enforces immutability and the PII boundary against an
   API compromise. Use it only when no role can be created.
 
-The old values `managed` and `external` still work: they are aliases of `app` and migrate logs a deprecation
-line. Change them to `app` in `deploy/.env` when convenient; the behaviour of both is covered by `app`.
+Any other value stops migrate.
 
 In `app` mode migrate looks at the database and takes one of four paths; the log says which:
 
@@ -224,7 +223,7 @@ which is the case on PostgreSQL ≥ 15 for the database owner.
 
 `deploy/tests/migrate-roles.sh` tests these paths against a throwaway PostgreSQL ≥ 16 server with pgvector
 (superuser owner, `CREATEROLE` owner with password sync, owner without `CREATEROLE`, pre-created role, `owner`
-mode, the deprecated aliases). It creates and drops `smz_mt_*` databases and roles and the cluster-wide
+mode, an unknown mode). It creates and drops `smz_mt_*` databases and roles and the cluster-wide
 `sermonize_app`; CI runs it in the tools image.
 
 If `up` stops at migrate, read `docker compose logs migrate`, fix the cause, run `docker compose up -d` again.

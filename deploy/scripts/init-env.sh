@@ -74,12 +74,6 @@ esac
 
 ROLE_MODE=${ROLE_MODE:-app}
 case $ROLE_MODE in
-  managed | external)
-    echo "ROLE_MODE=$ROLE_MODE is deprecated; using app" >&2
-    ROLE_MODE=app
-    ;;
-esac
-case $ROLE_MODE in
   app) APP_URL=postgres://sermonize_app:$APP_PW@$DB_HOSTPORT/$DB_NAME ;;
   owner) APP_URL=$OWNER_URL ;;
   *) echo "ROLE_MODE must be app or owner" >&2; exit 2 ;;

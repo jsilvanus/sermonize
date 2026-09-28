@@ -20,7 +20,6 @@
 #               d. sermonize_app is missing and the owner may not create roles: stops with the one-time SQL
 #                  for an administrator.
 #        owner  nothing: the API connects as the schema owner (DATABASE_APP_URL = DATABASE_OWNER_URL).
-#      The old values managed and external are accepted as deprecated aliases of app.
 #   5. checks that DATABASE_APP_URL can connect.
 set -eu
 
@@ -40,10 +39,6 @@ url_part() {
 
 case $MODE in
   app | owner) ;;
-  managed | external)
-    log "warning: SERMONIZE_APP_ROLE_MODE=$MODE is deprecated; it now means 'app' (set SERMONIZE_APP_ROLE_MODE=app in deploy/.env)"
-    MODE=app
-    ;;
   *) die "SERMONIZE_APP_ROLE_MODE must be app or owner (got '$MODE')" ;;
 esac
 
