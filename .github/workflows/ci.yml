@@ -42,13 +42,29 @@ jobs:
   # compose files, all image targets, and the host-nginx site with `nginx -t`.
   deploy:
     runs-on: ubuntu-latest
+    services:
+      # For the migrate role test (deploy/tests/migrate-roles.sh) in the tools image.
+      postgres:
+        image: pgvector/pgvector:0.8.1-pg16
+        env:
+          POSTGRES_USER: sermonize
+          POSTGRES_PASSWORD: sermonize
+          POSTGRES_DB: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U sermonize"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
     steps:
       - uses: actions/checkout@v4
       - name: Shell scripts (POSIX sh syntax)
-        run: for f in deploy/scripts/*.sh deploy/host-nginx/install.sh; do sh -n "$f"; done
+        run: for f in deploy/scripts/*.sh deploy/tests/*.sh deploy/host-nginx/install.sh; do sh -n "$f"; done
       - name: "Setup A (host nginx): throwaway .env, docker compose config"
         run: |
           ENV_FILE=/tmp/host-nginx.env sh deploy/scripts/init-env.sh host-nginx ci.sermonize.test
+          grep -qx 'SERMONIZE_APP_ROLE_MODE=app' /tmp/host-nginx.env
           cd deploy
           for profiles in "" "--profile bundled-db" "--profile bundled-db --profile tools"; do
             docker compose --env-file /tmp/host-nginx.env -f compose.yml -f host-nginx/compose.host-nginx.yml $profiles config --quiet
@@ -62,6 +78,7 @@ jobs:
           ENV_FILE=/tmp/traefik.env TRAEFIK_TRUSTED_CIDR=172.18.0.0/16 \
             DB_OWNER_URL=postgres://sermonize_user:ci@pg.shared.local:5432/sermonize_db \
             sh deploy/scripts/init-env.sh traefik ci.sermonize.test
+          grep -qx 'SERMONIZE_APP_ROLE_MODE=app' /tmp/traefik.env
           cd deploy
           docker compose --env-file /tmp/traefik.env -f compose.yml -f traefik/compose.traefik.yml config --quiet
           docker compose --env-file /tmp/traefik.env -f compose.yml -f traefik/compose.traefik.yml --profile tools config --quiet
@@ -85,6 +102,12 @@ jobs:
           for target in api mcp web tools; do
             test "$(docker run --rm --entrypoint id sermonize-$target:latest -u)" != 0
           done
+      - name: "sermonize-migrate: role handling against PostgreSQL 16 + pgvector (tools image)"
+        run: |
+          # Superuser owner, CREATEROLE owner, owner without CREATEROLE, pre-created role, owner mode, aliases.
+          docker run --rm --network host -v "$PWD/deploy/tests:/tests:ro" \
+            -e TEST_PG_ADMIN_URL=postgres://sermonize:sermonize@127.0.0.1:5432/postgres \
+            sermonize-tools:latest sh /tests/migrate-roles.sh
       - name: "Setup A: nginx -t on the host-nginx site (official nginx image, self-signed certificate)"
         run: |
           mkdir -p /tmp/nginx-test/cert

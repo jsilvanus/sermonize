@@ -12,7 +12,9 @@ publishes its OpenAPI document at `/docs` (Swagger UI) and `/docs/json`.
 [`docs/deployment.md`](docs/deployment.md) describes the production deployment (Docker Compose, one domain:
 web UI at `/`, API at `/api/`, MCP at `/mcp`) in two setups: behind nginx installed on the host, or behind
 the shared Traefik and PostgreSQL of the riksunsrk infrastructure. Prebuilt images are published to
-`ghcr.io/jsilvanus/sermonize-{api,mcp,web,tools}` for `v*` tags.
+`ghcr.io/jsilvanus/sermonize-{api,mcp,web,tools}` for `v*` tags. The API connects as the least-privileged `sermonize_app`
+(`SERMONIZE_APP_ROLE_MODE=app`, the default), which the migrate service creates or adopts depending on what the
+database owner may do; see [Database roles](docs/deployment.md#database-roles).
 
 ## Repository layout
 
@@ -644,6 +646,10 @@ Re-run it after every migration that adds tables or functions:
 psql "$OWNER_DATABASE_URL" -v ON_ERROR_STOP=1 -f packages/api/sql/roles.sql
 psql "$OWNER_DATABASE_URL" -c "ALTER ROLE sermonize_app PASSWORD '…'"
 ```
+
+In the Docker deployment the `migrate` service does this on every start (and creates the role, sets its password
+or leaves an administrator's role alone, depending on the owner's rights): see
+[`docs/deployment.md`, Database roles](docs/deployment.md#database-roles).
 
 ### Database-enforced rules
 
