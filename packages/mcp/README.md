@@ -159,9 +159,7 @@ Environment:
 On the **API** side: `MCP_LOGIN_TOKEN_TTL_HOURS` (default 720) sets how long an MCP sign-in lasts, and
 the API's `TRUST_PROXY` must list this server's address, or every MCP sign-in shares one rate-limit bucket.
 
-Removed (earlier versions): `MCP_DEFAULT_USER_ID`, `MCP_DEFAULT_USER_EMAIL`, `MCP_DEFAULT_USER_PASSWORD`
-and the `mcp-user` CLI (`npm run mcp-user`, with `--api-token` linking). Users and their roles are managed
-in the API only.
+Users and their roles are managed in the API only; the MCP server has no users of its own.
 
 ### Same domain as the web UI
 
@@ -181,15 +179,6 @@ the web UI does not use, so a reverse proxy routes by prefix:
 `/health` is also served, for the container health check (not needed publicly). The sign-in form posts to
 the relative `/oauth/authorize`, and the CSP `form-action` is `'self'` plus the OAuth client's redirect origin
 (see `LEARNED.md`).
-
-### Upgrading an existing SQLite file
-
-The schema version is kept in `PRAGMA user_version`. A file from before sign-in through the API (version 0)
-is upgraded on start by **dropping** its old tables (`users`, `sermonize_api_tokens`, `authorization_codes`,
-`refresh_tokens`) and creating the new ones: the old OAuth subjects were MCP user ids and their tokens were
-linked by hand, so nothing can be carried over. Existing MCP clients get `invalid_token` / `invalid_grant`
-and sign in again with their Sermonize account. The old linked API tokens are not revoked by this; revoke
-them with the API CLI (`npm run cli -- revoke-token <id>`) if they are no longer needed.
 
 ## Tools
 
@@ -294,7 +283,7 @@ Tests:
   encoding, JSON bodies, login/logout, error JSON -> code/message/details, 401/403 explanations,
   timeouts, unreachable API).
 - `token-crypto.test.ts`: encryption round trip, tamper/wrong-grant/wrong-key detection, key parsing,
-  the grant store (pending/active, ticket binding, cascade, sweep), the SQLite schema upgrade.
+  the grant store (pending/active, ticket binding, cascade, sweep), SQLite schema creation and version check.
 - `config.test.ts`: `TRUST_PROXY`, `MCP_PUBLIC_URL` validation, and discovery metadata / 401 challenge
   for `MCP_PUBLIC_URL=https://example.org`; all routes sit under proxy-routable prefixes.
 - `tools.test.ts` (stub API): discovery and the 401 challenge, the sign-in page, sign-in via

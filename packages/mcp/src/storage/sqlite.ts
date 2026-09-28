@@ -4,31 +4,22 @@ import { DatabaseSync } from 'node:sqlite';
 import type { AuthStore, AuthorizationCodeRecord, RefreshTokenRecord } from './interface.js';
 
 /**
- * Schema version kept in `PRAGMA user_version`.
- *
- * 0/1: the scaffold's schema plus MCP's own users (`users` with argon2 password hashes) and per-user
- *      linked API tokens (`sermonize_api_tokens`).
- * 2:   sign-in through the Sermonize API; one encrypted upstream token per OAuth grant (`grants`),
- *      codes and refresh tokens reference their grant.
- *
- * Upgrading from 0/1 DROPS the old tables: the old OAuth subjects were MCP user ids, not Sermonize
- * user ids, and the old tokens were linked by hand, so nothing can be carried over. Every MCP client
- * simply signs in again with its Sermonize (web) account. Nothing else lives in this file.
+ * Schema version kept in `PRAGMA user_version`: one encrypted upstream API token per OAuth grant
+ * (`grants`); authorization codes and refresh tokens reference their grant. Nothing else lives in this file.
  */
-export const SCHEMA_VERSION = 2;
+export const SCHEMA_VERSION = 1;
 
-export function migrateSchema(db: DatabaseSync): void {
+/** Creates the schema in a new (empty) file; refuses a file with any other schema version. */
+export function initSchema(db: DatabaseSync): void {
   const version = (db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version;
   if (version === SCHEMA_VERSION) return;
-  if (version > SCHEMA_VERSION) {
-    throw new Error(`STORAGE_PATH has schema version ${version}, newer than this server (${SCHEMA_VERSION})`);
+  if (version !== 0) {
+    throw new Error(`STORAGE_PATH has schema version ${version}; this server expects ${SCHEMA_VERSION}`);
   }
   db.exec('BEGIN IMMEDIATE');
   try {
     db.exec(
-      'DROP TABLE IF EXISTS authorization_codes; DROP TABLE IF EXISTS refresh_tokens;' +
-        'DROP TABLE IF EXISTS sermonize_api_tokens; DROP TABLE IF EXISTS users; DROP TABLE IF EXISTS grants;' +
-        'CREATE TABLE grants (id TEXT PRIMARY KEY, subject TEXT NOT NULL, client_id TEXT NOT NULL,' +
+      'CREATE TABLE grants (id TEXT PRIMARY KEY, subject TEXT NOT NULL, client_id TEXT NOT NULL,' +
         ' api_token TEXT NOT NULL, api_token_expires INTEGER NOT NULL,' +
         ' ticket_sha256 TEXT UNIQUE, request_sha256 TEXT, expires INTEGER NOT NULL, created_at INTEGER NOT NULL);' +
         'CREATE INDEX grants_expires ON grants (expires);' +
@@ -47,12 +38,12 @@ export function migrateSchema(db: DatabaseSync): void {
   }
 }
 
-/** Opens (creating if needed) the SQLite file and brings its schema up to date. */
+/** Opens (creating if needed) the SQLite file and creates its schema if it is new. */
 export function openDatabase(path: string): DatabaseSync {
   if (path !== ':memory:') mkdirSync(dirname(path), { recursive: true });
   const db = new DatabaseSync(path);
   db.exec('PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 5000;');
-  migrateSchema(db);
+  initSchema(db);
   return db;
 }
 
