@@ -1,0 +1,125 @@
+# Setup B: behind the shared Traefik of riksunsrk/infra (docs/deployment.md, "Setup B").
+#   COMPOSE_FILE=compose.yml:traefik/compose.traefik.yml   (deploy/.env, written by init-env.sh traefik)
+#
+# No host ports. web, api and mcp join Traefik's network (TRAEFIK_NETWORK, default traefik-public) and
+# carry router labels; api, migrate and tools join the shared database network (SHARED_NETWORK, default
+# shared_multi_network) to reach pg.shared.local:5432. Service-to-service traffic stays on the internal
+# `backend` network under unique aliases (sermonize-api), never over the shared networks.
+#
+# Routing on one host name (DOMAIN), highest priority first:
+#   sermonize-mcp        300  /mcp, /oauth/*, the four OAuth/OIDC discovery documents  -> mcp:5999
+#   sermonize-api-admin  250  /api/admin/*  (strip /api, optional IP allowlist)         -> api:3000
+#   sermonize-api        200  /api, /api/*  (strip /api)                                -> api:3000
+#   sermonize-web          1  everything else (incl. other /.well-known/*: web's 404)  -> web:3100
+# The MCP server's /health and the API's routes outside /api are not reachable from outside.
+#
+# TRUST_PROXY: web and mcp trust Traefik's network (TRAEFIK_TRUSTED_CIDR, its subnet); the api trusts
+# that and the backend subnet (web, mcp). Traefik drops X-Forwarded-For from untrusted clients and sets
+# the real client address itself (unless infra configured forwardedHeaders.trustedIPs for a CDN).
+
+x-traefik-networks: &traefik-networks
+  - backend
+  - traefik
+
+services:
+  web:
+    networks: *traefik-networks
+    environment:
+      TRUST_PROXY: ${TRAEFIK_TRUSTED_CIDR:?set TRAEFIK_TRUSTED_CIDR in deploy/.env (subnet of the Traefik network)}
+    labels:
+      - "traefik.enable=true"
+      - "traefik.docker.network=${TRAEFIK_NETWORK:-traefik-public}"
+      - "traefik.http.routers.sermonize-web.rule=Host(`${DOMAIN}`)"
+      - "traefik.http.routers.sermonize-web.priority=1"
+      - "traefik.http.routers.sermonize-web.entrypoints=${TRAEFIK_ENTRYPOINT:-websecure}"
+      - "traefik.http.routers.sermonize-web.tls=true"
+      - "traefik.http.routers.sermonize-web.tls.certresolver=${TRAEFIK_CERTRESOLVER:-letsencrypt}"
+      - "traefik.http.routers.sermonize-web.middlewares=${TRAEFIK_WEB_MIDDLEWARES:-sermonize-hsts}"
+      - "traefik.http.routers.sermonize-web.service=sermonize-web"
+      - "traefik.http.services.sermonize-web.loadbalancer.server.port=3100"
+      # HSTS only: the web UI sets its own CSP, frame, nosniff and referrer headers.
+      - "traefik.http.middlewares.sermonize-hsts.headers.stsSeconds=63072000"
+      - "traefik.http.middlewares.sermonize-hsts.headers.stsIncludeSubdomains=true"
+
+  api:
+    networks:
+      - backend
+      - traefik
+      - shared
+    environment:
+      TRUST_PROXY: ${TRAEFIK_TRUSTED_CIDR:?set TRAEFIK_TRUSTED_CIDR in deploy/.env (subnet of the Traefik network)},${SERMONIZE_BACKEND_SUBNET:-172.28.0.0/24}
+    labels:
+      - "traefik.enable=true"
+      - "traefik.docker.network=${TRAEFIK_NETWORK:-traefik-public}"
+      - "traefik.http.services.sermonize-api.loadbalancer.server.port=3000"
+      # /api -> /api/, then strip the prefix (the API's routes are at its root; PUBLIC_BASE_PATH=/api).
+      - "traefik.http.middlewares.sermonize-api-slash.redirectregex.regex=^(https?://[^/]+/api)$$"
+      - "traefik.http.middlewares.sermonize-api-slash.redirectregex.replacement=$${1}/"
+      - "traefik.http.middlewares.sermonize-api-slash.redirectregex.permanent=true"
+      - "traefik.http.middlewares.sermonize-api-strip.stripprefix.prefixes=/api"
+      # Security headers for the API and the MCP server, which set none of their own.
+      - "traefik.http.middlewares.sermonize-secheaders.headers.stsSeconds=63072000"
+      - "traefik.http.middlewares.sermonize-secheaders.headers.stsIncludeSubdomains=true"
+      - "traefik.http.middlewares.sermonize-secheaders.headers.contentTypeNosniff=true"
+      - "traefik.http.middlewares.sermonize-secheaders.headers.frameDeny=true"
+      - "traefik.http.middlewares.sermonize-secheaders.headers.referrerPolicy=no-referrer"
+      # Optional allowlist for user/token administration (default: everyone; the API checks the admin role).
+      - "traefik.http.middlewares.sermonize-admin-allow.ipallowlist.sourcerange=${ADMIN_ALLOW_CIDRS:-0.0.0.0/0,::/0}"
+      - "traefik.http.routers.sermonize-api.rule=Host(`${DOMAIN}`) && (Path(`/api`) || PathPrefix(`/api/`))"
+      - "traefik.http.routers.sermonize-api.priority=200"
+      - "traefik.http.routers.sermonize-api.entrypoints=${TRAEFIK_ENTRYPOINT:-websecure}"
+      - "traefik.http.routers.sermonize-api.tls=true"
+      - "traefik.http.routers.sermonize-api.tls.certresolver=${TRAEFIK_CERTRESOLVER:-letsencrypt}"
+      - "traefik.http.routers.sermonize-api.middlewares=sermonize-api-slash,sermonize-api-strip,sermonize-secheaders"
+      - "traefik.http.routers.sermonize-api.service=sermonize-api"
+      - "traefik.http.routers.sermonize-api-admin.rule=Host(`${DOMAIN}`) && PathPrefix(`/api/admin/`)"
+      - "traefik.http.routers.sermonize-api-admin.priority=250"
+      - "traefik.http.routers.sermonize-api-admin.entrypoints=${TRAEFIK_ENTRYPOINT:-websecure}"
+      - "traefik.http.routers.sermonize-api-admin.tls=true"
+      - "traefik.http.routers.sermonize-api-admin.tls.certresolver=${TRAEFIK_CERTRESOLVER:-letsencrypt}"
+      - "traefik.http.routers.sermonize-api-admin.middlewares=sermonize-admin-allow,sermonize-api-strip,sermonize-secheaders"
+      - "traefik.http.routers.sermonize-api-admin.service=sermonize-api"
+
+  mcp:
+    networks:
+      - backend
+      - egress
+      - traefik
+    environment:
+      TRUST_PROXY: ${TRAEFIK_TRUSTED_CIDR:?set TRAEFIK_TRUSTED_CIDR in deploy/.env (subnet of the Traefik network)}
+    labels:
+      - "traefik.enable=true"
+      - "traefik.docker.network=${TRAEFIK_NETWORK:-traefik-public}"
+      - "traefik.http.services.sermonize-mcp.loadbalancer.server.port=5999"
+      # Exact paths only: the MCP resource, the OAuth server and its discovery documents (not /health).
+      - "traefik.http.routers.sermonize-mcp.rule=Host(`${DOMAIN}`) && (Path(`/mcp`) || PathPrefix(`/oauth/`) || Path(`/.well-known/oauth-protected-resource`) || Path(`/.well-known/oauth-protected-resource/mcp`) || Path(`/.well-known/oauth-authorization-server`) || Path(`/.well-known/openid-configuration`))"
+      - "traefik.http.routers.sermonize-mcp.priority=300"
+      - "traefik.http.routers.sermonize-mcp.entrypoints=${TRAEFIK_ENTRYPOINT:-websecure}"
+      - "traefik.http.routers.sermonize-mcp.tls=true"
+      - "traefik.http.routers.sermonize-mcp.tls.certresolver=${TRAEFIK_CERTRESOLVER:-letsencrypt}"
+      # Same definition as on the api (identical duplicates are fine), so mcp does not depend on api's labels.
+      - "traefik.http.middlewares.sermonize-secheaders.headers.stsSeconds=63072000"
+      - "traefik.http.middlewares.sermonize-secheaders.headers.stsIncludeSubdomains=true"
+      - "traefik.http.middlewares.sermonize-secheaders.headers.contentTypeNosniff=true"
+      - "traefik.http.middlewares.sermonize-secheaders.headers.frameDeny=true"
+      - "traefik.http.middlewares.sermonize-secheaders.headers.referrerPolicy=no-referrer"
+      - "traefik.http.routers.sermonize-mcp.middlewares=sermonize-secheaders"
+      - "traefik.http.routers.sermonize-mcp.service=sermonize-mcp"
+
+  migrate:
+    networks:
+      - backend
+      - shared
+
+  tools:
+    networks:
+      - backend
+      - shared
+
+networks:
+  traefik:
+    name: ${TRAEFIK_NETWORK:-traefik-public}
+    external: true
+  shared:
+    name: ${SHARED_NETWORK:-shared_multi_network}
+    external: true

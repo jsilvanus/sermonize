@@ -38,22 +38,39 @@ jobs:
       # database's schemas, the MCP suite only adds its own rows to it.
       - run: npm test
 
-  # Validates the production deployment (deploy/, Dockerfile) without any real secrets:
-  # compose file, all image targets, and the rendered nginx configuration.
+  # Validates the production deployment (deploy/, Dockerfile) without any real secrets: both setups'
+  # compose files, all image targets, and the host-nginx site with `nginx -t`.
   deploy:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Throwaway deploy/.env (fresh random secrets, test domain)
-        run: sh deploy/scripts/init-env.sh ci.sermonize.test
-      - name: docker compose config
-        run: |
-          docker compose -f deploy/docker-compose.yml config --quiet
-          docker compose -f deploy/docker-compose.yml --profile certbot --profile tools config --quiet
-          # The example must not ship secrets: they stay empty there (init-env.sh fills them).
-          test -z "$(grep -E '^(POSTGRES_PASSWORD|SERMONIZE_APP_DB_PASSWORD|MCP_JWT_SECRET|MCP_TOKEN_KEY|WEB_COOKIE_SECRET)=.+' deploy/.env.example)"
       - name: Shell scripts (POSIX sh syntax)
-        run: for f in deploy/scripts/*.sh; do sh -n "$f"; done
+        run: for f in deploy/scripts/*.sh deploy/host-nginx/install.sh; do sh -n "$f"; done
+      - name: "Setup A (host nginx): throwaway .env, docker compose config"
+        run: |
+          ENV_FILE=/tmp/host-nginx.env sh deploy/scripts/init-env.sh host-nginx ci.sermonize.test
+          cd deploy
+          for profiles in "" "--profile bundled-db" "--profile bundled-db --profile tools"; do
+            docker compose --env-file /tmp/host-nginx.env -f compose.yml -f host-nginx/compose.host-nginx.yml $profiles config --quiet
+          done
+          # Published only on loopback.
+          docker compose --env-file /tmp/host-nginx.env -f compose.yml -f host-nginx/compose.host-nginx.yml config --format json |
+            jq -e '[.services[] | .ports // [] | .[] | .host_ip] | length == 3 and all(. == "127.0.0.1")'
+      - name: "Setup B (Traefik): throwaway .env, docker compose config"
+        run: |
+          # `config` does not need the external networks to exist.
+          ENV_FILE=/tmp/traefik.env TRAEFIK_TRUSTED_CIDR=172.18.0.0/16 \
+            DB_OWNER_URL=postgres://sermonize_user:ci@pg.shared.local:5432/sermonize_db \
+            sh deploy/scripts/init-env.sh traefik ci.sermonize.test
+          cd deploy
+          docker compose --env-file /tmp/traefik.env -f compose.yml -f traefik/compose.traefik.yml config --quiet
+          docker compose --env-file /tmp/traefik.env -f compose.yml -f traefik/compose.traefik.yml --profile tools config --quiet
+          # No host ports, no bundled database.
+          docker compose --env-file /tmp/traefik.env -f compose.yml -f traefik/compose.traefik.yml config --format json |
+            jq -e '([.services[] | .ports // [] | .[]] | length == 0) and (.services.db == null)'
+      - name: The example ships no secrets
+        run: |
+          test -z "$(grep -E '^(POSTGRES_PASSWORD|DATABASE_OWNER_URL|DATABASE_APP_URL|MCP_JWT_SECRET|MCP_TOKEN_KEY|WEB_COOKIE_SECRET)=.+' deploy/.env.example)"
       - name: Build image targets
         run: |
           for target in api mcp web tools; do
@@ -63,11 +80,22 @@ jobs:
         run: |
           docker run --rm sermonize-tools:latest sermonize-db help > /dev/null
           docker run --rm sermonize-tools:latest sermonize-admin --help > /dev/null
-          docker run --rm sermonize-tools:latest psql --version
-          for target in api mcp web; do
+          docker run --rm sermonize-tools:latest pg_dump --version
+          docker run --rm sermonize-tools:latest sh -n /usr/local/bin/sermonize-migrate
+          for target in api mcp web tools; do
             test "$(docker run --rm --entrypoint id sermonize-$target:latest -u)" != 0
           done
-      - name: nginx -t with a self-signed certificate
+      - name: "Setup A: nginx -t on the host-nginx site (official nginx image, self-signed certificate)"
         run: |
-          sh deploy/scripts/self-signed.sh
-          docker compose -f deploy/docker-compose.yml run --rm --no-deps nginx nginx -t
+          mkdir -p /tmp/nginx-test/cert
+          openssl req -x509 -nodes -newkey rsa:2048 -days 1 -subj /CN=ci.sermonize.test \
+            -keyout /tmp/nginx-test/cert/privkey.pem -out /tmp/nginx-test/cert/fullchain.pem
+          ENV_FILE=/tmp/host-nginx.env CERT_DIR=/etc/nginx/test-cert IPV6=0 RENDER_ONLY=/tmp/nginx-test/sermonize.conf \
+            sh deploy/host-nginx/install.sh
+          # Upstreams are 127.0.0.1:<port>, so no stub hosts are needed; a closed port is fine for `nginx -t`.
+          docker run --rm \
+            -v /tmp/nginx-test/sermonize.conf:/etc/nginx/conf.d/sermonize.conf:ro \
+            -v "$PWD/deploy/host-nginx/snippets:/etc/nginx/sermonize/snippets:ro" \
+            -v "$PWD/deploy/host-nginx/admin-allow.conf:/etc/nginx/sermonize/admin-allow.conf:ro" \
+            -v /tmp/nginx-test/cert:/etc/nginx/test-cert:ro \
+            nginx:1.28-alpine nginx -t

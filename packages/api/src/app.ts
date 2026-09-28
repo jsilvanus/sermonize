@@ -74,6 +74,15 @@ export async function buildApp({
   registerErrorHandlers(app);
   app.addHook('onSend', async (request, reply) => {
     reply.header('x-request-id', request.id);
+    // Behind a prefix-stripping proxy, root-relative redirects (e.g. Swagger UI's
+    // /docs/static/index.html -> /docs/) must point back under the prefix. Done here rather than in the
+    // proxy so every proxy (nginx, Traefik's stripprefix) behaves the same.
+    if (basePath) {
+      const location = reply.getHeader('location');
+      if (typeof location === 'string' && location.startsWith('/') && !location.startsWith('//')) {
+        reply.header('location', basePath + location);
+      }
+    }
   });
 
   await app.register(dbPlugin, { pool });

@@ -1,0 +1,60 @@
+# Setup A: nginx installed on the host (sites-available/sermonize.conf) in front of the stack.
+#   COMPOSE_FILE=compose.yml:host-nginx/compose.host-nginx.yml   (deploy/.env, written by init-env.sh)
+#
+# api, mcp and web are published ONLY on 127.0.0.1 (host nginx proxies to them); nothing listens on a
+# public interface except the host's nginx. The published ports sit on `edge`, a bridge network with a
+# pinned subnet and gateway: every connection from the host into a container (host nginx via the published
+# port, whether through Docker's userland proxy or its NAT rules) arrives from that gateway address.
+# web and mcp therefore trust exactly the gateway (TRUST_PROXY), the api trusts the gateway (nginx ->
+# /api/) and the backend subnet (web, mcp). nginx replaces X-Forwarded-For with the real client address,
+# so the client address survives every hop.
+#
+# `edge` is not internal, so api, migrate and tools can also reach an external database (on another
+# server, or on this host as host.docker.internal = Docker's host-gateway address, usually docker0's
+# 172.17.0.1: PostgreSQL must then listen on that address and allow SERMONIZE_EDGE_SUBNET in pg_hba.conf).
+
+services:
+  api:
+    ports:
+      - "127.0.0.1:${API_HOST_PORT:-18101}:3000"
+    environment:
+      TRUST_PROXY: ${SERMONIZE_EDGE_GATEWAY:-172.28.1.1},${SERMONIZE_BACKEND_SUBNET:-172.28.0.0/24}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    networks:
+      - edge
+
+  mcp:
+    ports:
+      - "127.0.0.1:${MCP_HOST_PORT:-18102}:5999"
+    environment:
+      TRUST_PROXY: ${SERMONIZE_EDGE_GATEWAY:-172.28.1.1}
+    networks:
+      - edge
+
+  web:
+    ports:
+      - "127.0.0.1:${WEB_HOST_PORT:-18100}:3100"
+    environment:
+      TRUST_PROXY: ${SERMONIZE_EDGE_GATEWAY:-172.28.1.1}
+    networks:
+      - edge
+
+  migrate:
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    networks:
+      - edge
+
+  tools:
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    networks:
+      - edge
+
+networks:
+  edge:
+    ipam:
+      config:
+        - subnet: ${SERMONIZE_EDGE_SUBNET:-172.28.1.0/24}
+          gateway: ${SERMONIZE_EDGE_GATEWAY:-172.28.1.1}

@@ -1,6 +1,6 @@
 #!/bin/sh
 # Creates the first admin account with the API's database CLI (as the schema owner, in the tools
-# container). The password is prompted without echo and passed on stdin (--password-stdin); it never
+# container; bundled or external database). The password is prompted without echo and passed on stdin (--password-stdin); it never
 # appears on a command line or in the shell history.
 #   sh scripts/bootstrap-admin.sh <email> [display name]
 # Then sign in over HTTPS:  SERMONIZE_API_URL=https://<DOMAIN>/api sermonize-admin login --email <email>
@@ -44,6 +44,6 @@ else
 fi
 
 # -T: no TTY, so the password on stdin reaches the CLI unchanged.
-printf '%s\n' "$PW" | docker compose --profile tools run --rm -T tools \
+printf '%s\n' "$PW" | docker compose run --rm --no-deps -T tools \
   sermonize-db create-user --kind human --role admin --email "$EMAIL" --password-stdin "$@"
-echo "admin created (the id above). Next: sermonize-admin login --email $EMAIL (see docs/deployment.md)" >&2
+echo "admin created (the id above). Next: SERMONIZE_API_URL=https://<DOMAIN>/api sermonize-admin login --email $EMAIL (docs/deployment.md)" >&2

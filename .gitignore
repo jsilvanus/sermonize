@@ -8,5 +8,4 @@ coverage/
 **/data/*.sqlite-*
 # Deployment: secrets, certificates, backups
 deploy/.env
-deploy/certbot/
 deploy/backups/
