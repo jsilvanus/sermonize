@@ -6,7 +6,7 @@ import { createHash } from 'node:crypto';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { Pool, PoolClient } from 'pg';
 import { writeBatchAudit } from '../src/lib/batch-audit.js';
-import { asUser, createTestPool, createUser, expectPgError, type TestUser } from './helpers.js';
+import { AUDIT_ORDER, asUser, createTestPool, createUser, expectPgError, type TestUser } from './helpers.js';
 
 const PRODUCER = { tool: 'test-suite', version: '1.0.0' };
 const sha256 = (s: string) => createHash('sha256').update(s, 'utf8').digest('hex');
@@ -239,7 +239,7 @@ describe('database rules', () => {
       );
       expect(s.withdrawn_by).toBe(curator.id);
       await as((c) => c.query(`UPDATE embedding_space SET withdrawn_at = now() WHERE id = $1`, [d.space.id]));
-      const audit = await pool.query(`SELECT action FROM audit_event WHERE entity_id = $1 ORDER BY occurred_at, id`, [d.seg.id]);
+      const audit = await pool.query(`SELECT action FROM audit_event WHERE entity_id = $1 ORDER BY ${AUDIT_ORDER}`, [d.seg.id]);
       expect(audit.rows.map((r) => r.action)).toEqual(['insert', 'withdraw']);
     });
 
@@ -300,7 +300,7 @@ describe('database rules', () => {
       await expectPgError(as((c) => c.query(`UPDATE clustering_run SET status = 'open' WHERE id = $1`, [d.run.id])), 'SZ003');
       await as((c) => c.query(`UPDATE clustering_run SET status = 'withdrawn' WHERE id = $1`, [d.run.id]));
 
-      const audit = await pool.query(`SELECT action, changes FROM audit_event WHERE entity_type = 'clustering_run' AND entity_id = $1 ORDER BY occurred_at, id`, [d.run.id]);
+      const audit = await pool.query(`SELECT action, changes FROM audit_event WHERE entity_type = 'clustering_run' AND entity_id = $1 ORDER BY ${AUDIT_ORDER}`, [d.run.id]);
       expect(audit.rows.map((r) => r.action)).toEqual(['insert', 'status_change', 'status_change']);
       expect(audit.rows[1].changes.status).toEqual({ old: 'open', new: 'complete' });
     });
@@ -368,7 +368,7 @@ describe('database rules', () => {
       await as((c) => c.query(`UPDATE text SET coverage = 'partial' WHERE id = $1`, [t.id])); // no-op: no event
 
       const { rows } = await pool.query(
-        `SELECT action, actor_id, request_id, changes FROM audit_event WHERE entity_type = 'text' AND entity_id = $1 ORDER BY occurred_at, id`,
+        `SELECT action, actor_id, request_id, changes FROM audit_event WHERE entity_type = 'text' AND entity_id = $1 ORDER BY ${AUDIT_ORDER}`,
         [t.id],
       );
       expect(rows.map((r) => r.action)).toEqual(['insert', 'update']);
@@ -390,7 +390,7 @@ describe('database rules', () => {
         await c.query(`DELETE FROM work_person WHERE work_id = $1`, [w.id]);
         return w;
       });
-      const { rows } = await pool.query(`SELECT action FROM audit_event WHERE entity_type = 'work_person' AND entity_id = $1 ORDER BY occurred_at, id`, [w.id]);
+      const { rows } = await pool.query(`SELECT action FROM audit_event WHERE entity_type = 'work_person' AND entity_id = $1 ORDER BY ${AUDIT_ORDER}`, [w.id]);
       // same transaction: UUIDv7 ids within one millisecond are unordered, so compare as a set
       expect(rows.map((r) => r.action).sort()).toEqual(['delete', 'insert']);
     });

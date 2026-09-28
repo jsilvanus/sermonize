@@ -4,7 +4,7 @@ import { withTransaction } from '../src/db/transaction.js';
 import { createVectorIndex, dropVectorIndex, indexStatus } from '../src/lib/vector-index.js';
 import { indexName } from '../src/lib/vector.js';
 import { buildSearchSql, runSearch, type SearchInput } from '../src/routes/derived/search.js';
-import { api, asSystem, createUser, setupTestApp, SYSTEM_PRINCIPAL, type TestContext, type TestUser } from './helpers.js';
+import { AUDIT_ORDER, api, asSystem, createUser, setupTestApp, SYSTEM_PRINCIPAL, type TestContext, type TestUser } from './helpers.js';
 
 const producer = { tool: 'embedder', version: '0.9' };
 
@@ -205,7 +205,7 @@ describe('embedding spaces, embeddings and search', () => {
 
       const audit = await ctx.pool.query(
         `SELECT batch_count, actor_id, request_id, changes FROM audit_event
-          WHERE action = 'batch_insert' AND entity_type = 'embedding' AND entity_id = $1 ORDER BY occurred_at, id`,
+          WHERE action = 'batch_insert' AND entity_type = 'embedding' AND entity_id = $1 ORDER BY ${AUDIT_ORDER}`,
         [space.id],
       );
       expect(audit.rows).toEqual([

@@ -6,7 +6,7 @@ import { randomUUID } from 'node:crypto';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { hashToken } from '../src/lib/tokens.js';
 import { issueToken } from '../src/lib/users.js';
-import { api, asSystem, createUser, setupTestApp, SYSTEM_PRINCIPAL, type TestContext, type TestUser } from './helpers.js';
+import { AUDIT_ORDER, api, asSystem, createUser, setupTestApp, SYSTEM_PRINCIPAL, type TestContext, type TestUser } from './helpers.js';
 
 const PASSWORD = 'a long enough admin-set password';
 const run = randomUUID().slice(0, 8);
@@ -221,7 +221,7 @@ describe('admin user management', () => {
     expect((await patch({ email: 'not-an-email' })).statusCode).toBe(400);
 
     const audit = await ctx.pool.query(
-      `SELECT action, entity_type, changes FROM audit_event WHERE entity_id = $1 AND action IN ('update', 'pii_update') ORDER BY occurred_at, id`,
+      `SELECT action, entity_type, changes FROM audit_event WHERE entity_id = $1 AND action IN ('update', 'pii_update') ORDER BY ${AUDIT_ORDER}`,
       [user.id],
     );
     expect(audit.rows).toEqual([
@@ -248,7 +248,7 @@ describe('admin user management', () => {
     await api(ctx.app, admin, { method: 'PATCH', url: `/admin/users/${user.id}`, payload: { status: 'active' } });
     expect((await api(ctx.app, token, { method: 'GET', url: '/me' })).statusCode).toBe(200);
     const audit = await ctx.pool.query(
-      `SELECT changes FROM audit_event WHERE entity_id = $1 AND action = 'update' ORDER BY occurred_at, id`,
+      `SELECT changes FROM audit_event WHERE entity_id = $1 AND action = 'update' ORDER BY ${AUDIT_ORDER}`,
       [user.id],
     );
     expect(audit.rows.map((r) => r.changes.status)).toEqual([
@@ -326,7 +326,7 @@ describe('admin user management', () => {
     expect((await put({ password: PASSWORD }, noEmail.id)).statusCode).toBe(422);
 
     const audit = await ctx.pool.query(
-      `SELECT action, changes FROM audit_event WHERE (entity_id = $1 AND action = 'password_set') OR (action = 'token_revoke' AND changes->>'user_id' = $1::text) ORDER BY occurred_at, action, id`,
+      `SELECT action, changes FROM audit_event WHERE (entity_id = $1 AND action = 'password_set') OR (action = 'token_revoke' AND changes->>'user_id' = $1::text) ORDER BY ${AUDIT_ORDER}`,
       [user.id],
     );
     expect(audit.rows.map((r) => r.action)).toEqual(['password_set', 'password_set', 'token_revoke', 'token_revoke']);

@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { api, createUser, setupTestApp, type TestContext, type TestUser } from './helpers.js';
+import { AUDIT_ORDER, api, createUser, setupTestApp, type TestContext, type TestUser } from './helpers.js';
 
 const sha256 = (s: string) => createHash('sha256').update(s, 'utf8').digest('hex');
 const sorted = (...xs: string[]) => xs.sort();
@@ -64,7 +64,7 @@ describe('sources and texts', () => {
       expect(p.statusCode).toBe(200);
       expect(p.json()).toMatchObject({ license: 'CC0', access_level: 'restricted', updated_by: curator.id });
       const audit = await ctx.pool.query(
-        `SELECT action, changes FROM audit_event WHERE entity_type = 'source' AND entity_id = $1 ORDER BY occurred_at, id`,
+        `SELECT action, changes FROM audit_event WHERE entity_type = 'source' AND entity_id = $1 ORDER BY ${AUDIT_ORDER}`,
         [s.id],
       );
       expect(audit.rows.map((r) => r.action)).toEqual(['insert', 'update']);
@@ -304,7 +304,7 @@ describe('sources and texts', () => {
         updated_by: curator.id,
       });
       const audit = await ctx.pool.query(
-        `SELECT action, actor_id, changes FROM audit_event WHERE entity_type = 'text' AND entity_id = $1 ORDER BY occurred_at, id`,
+        `SELECT action, actor_id, changes FROM audit_event WHERE entity_type = 'text' AND entity_id = $1 ORDER BY ${AUDIT_ORDER}`,
         [t.id],
       );
       expect(audit.rows.map((r) => r.action)).toEqual(['insert', 'update']);

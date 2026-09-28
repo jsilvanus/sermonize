@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { api, createUser, setupTestApp, type TestContext, type TestUser } from './helpers.js';
+import { AUDIT_ORDER, api, createUser, setupTestApp, type TestContext, type TestUser } from './helpers.js';
 
 describe('persons and works', () => {
   let ctx: TestContext;
@@ -110,7 +110,7 @@ describe('persons and works', () => {
 
       const audit = await ctx.pool.query(
         `SELECT action, actor_id, request_id, changes FROM audit_event
-          WHERE entity_type = 'person' AND entity_id = $1 ORDER BY occurred_at, id`,
+          WHERE entity_type = 'person' AND entity_id = $1 ORDER BY ${AUDIT_ORDER}`,
         [p.id],
       );
       expect(audit.rows.map((r) => r.action)).toEqual(['insert', 'update']);
@@ -138,7 +138,7 @@ describe('persons and works', () => {
       expect((await post(curator, `/persons/${p.id}/withdraw`, {})).statusCode).toBe(400);
 
       const audit = await ctx.pool.query(
-        `SELECT action FROM audit_event WHERE entity_type = 'person' AND entity_id = $1 ORDER BY occurred_at, id`,
+        `SELECT action FROM audit_event WHERE entity_type = 'person' AND entity_id = $1 ORDER BY ${AUDIT_ORDER}`,
         [p.id],
       );
       expect(audit.rows.map((r) => r.action)).toEqual(['insert', 'withdraw']);
@@ -280,7 +280,7 @@ describe('persons and works', () => {
       expect(removed.json().persons.map((x: { person_id: string }) => x.person_id)).toEqual([c.id]);
 
       const audit = await ctx.pool.query(
-        `SELECT action, changes FROM audit_event WHERE entity_type = 'work_person' AND entity_id = $1 ORDER BY occurred_at, id`,
+        `SELECT action, changes FROM audit_event WHERE entity_type = 'work_person' AND entity_id = $1 ORDER BY ${AUDIT_ORDER}`,
         [w.id],
       );
       // (ids of events written in the same millisecond are not ordered, so compare as a multiset)
@@ -349,7 +349,7 @@ describe('persons and works', () => {
       expect((await patch(curator, `/works/${parent.id}`, { part_of_work_id: parent.id })).statusCode).toBe(422);
 
       const audit = await ctx.pool.query(
-        `SELECT action, changes FROM audit_event WHERE entity_type = 'work' AND entity_id = $1 ORDER BY occurred_at, id`,
+        `SELECT action, changes FROM audit_event WHERE entity_type = 'work' AND entity_id = $1 ORDER BY ${AUDIT_ORDER}`,
         [child.id],
       );
       expect(audit.rows.map((r) => r.action)).toEqual(['insert', 'update']);
