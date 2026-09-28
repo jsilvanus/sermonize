@@ -113,7 +113,7 @@ deploy/
 | `SERMONIZE_IMAGE_PREFIX` / `SERMONIZE_TAG` | `sermonize` / `latest` | compose | see [Images](#images-build-or-pull) |
 | `DATABASE_OWNER_URL` | required | migrate, tools, backups | the schema owner |
 | `DATABASE_APP_URL` | required | api (`DATABASE_URL`), migrate | `sermonize_app`, or the owner URL in `owner` mode |
-| `SERMONIZE_APP_ROLE_MODE` | `managed` | migrate | `managed`, `external` or `owner` ([roles](#database-roles-and-migrations)) |
+| `SERMONIZE_APP_ROLE_MODE` | `app` | migrate | `app` or `owner` ([roles](#database-roles)) |
 | `POSTGRES_PASSWORD` | bundled db only | db | owner `sermonize`; only applied when the volume is initialised |
 | `MCP_JWT_SECRET` | required | mcp (`JWT_SECRET`) | base64, ≥ 32 bytes |
 | `MCP_TOKEN_KEY` | required | mcp (`SERMONIZE_TOKEN_KEY`) | base64 of exactly 32 bytes |
@@ -144,35 +144,87 @@ Database URLs: percent-encode special characters in passwords (the generated hex
 The `migrate` service (`sermonize-migrate`, [`deploy/scripts/migrate.sh`](../deploy/scripts/migrate.sh))
 runs before the API on every `docker compose up`; it is idempotent. It
 
-1. checks the owner's connection and **pgvector**: the extension must be installed in the database or be
-   creatable by the owner. pgvector's control file is not `trusted`, so `CREATE EXTENSION vector` (in
-   migration 0001, written `IF NOT EXISTS`) needs a **superuser**: the bundled db's owner is one; on a
-   shared server an administrator runs it once
-   (`psql -U postgres -d sermonize_db -c 'CREATE EXTENSION IF NOT EXISTS vector'`) and the server image must
-   ship pgvector (e.g. `pgvector/pgvector:0.8.1-pg16`). Otherwise migrate stops with exactly that instruction;
+1. checks the owner's connection and **pgvector**. The server must have pgvector installed (it must appear in
+   `pg_available_extensions`): the bundled db uses `pgvector/pgvector:0.8.1-pg16`; a shared server's image must
+   install the package `postgresql-16-pgvector` (the official `postgres:16` image does **not** include it) or be
+   a pgvector image. The extension must then be installed in the database or be creatable by the owner.
+   pgvector's control file is not `trusted`, so `CREATE EXTENSION vector` (in migration 0001, written
+   `IF NOT EXISTS`) needs a **superuser**: the bundled db's owner is one; on a shared server an administrator
+   runs it once (`psql -U postgres -d sermonize_db -c 'CREATE EXTENSION IF NOT EXISTS vector'`). Otherwise
+   migrate stops with exactly these instructions;
 2. applies pending migrations as the owner (`DATABASE_OWNER_URL`);
 3. withdraws `PUBLIC` access to the `private` schema and its functions (again);
-4. handles the API's least-privileged role `sermonize_app` according to `SERMONIZE_APP_ROLE_MODE`:
-
-| mode | who creates `sermonize_app` | what migrate does | use |
-|---|---|---|---|
-| `managed` | migrate ([`sql/roles.sql`](../packages/api/sql/roles.sql)) | `roles.sql` (role + grants), `GRANT CONNECT`, sets the role's password from `DATABASE_APP_URL` (via psql `\getenv`, never on a command line). Needs an owner that may create and alter roles | bundled db (default) |
-| `external` | a database administrator, once | checks that the role exists, applies `roles.sql` (its `CREATE ROLE` is skipped for an existing role, the grants are the owner's to give) and `GRANT CONNECT`; never touches the role or its password | shared PostgreSQL (Setup B default) |
-| `owner` | nobody | nothing; the API connects as the schema owner (`DATABASE_APP_URL` = `DATABASE_OWNER_URL`) | when no role can be created. **Weaker isolation**: the API may then alter tables, disable triggers and read `private` directly, so the database no longer enforces immutability and the PII boundary against an API compromise |
-
-   For `external`, the administrator runs once (as a superuser or a role with `CREATEROLE`), with the password
-   from `DATABASE_APP_URL` (init-env.sh prints these lines with the generated password):
-
-   ```sql
-   CREATE ROLE sermonize_app LOGIN PASSWORD '<password from DATABASE_APP_URL>';
-   GRANT CONNECT ON DATABASE sermonize_db TO sermonize_app;
-   -- rotate later with: ALTER ROLE sermonize_app PASSWORD '<new>';  (and update DATABASE_APP_URL)
-   ```
-
-   Role names are cluster-wide: one `sermonize_app` per PostgreSQL server (one Sermonize database per
-   server). The `REVOKE CREATE ON SCHEMA public FROM PUBLIC` in `roles.sql` needs the owner to own the
-   `public` schema, which is the case on PostgreSQL ≥ 15 for the database owner.
+4. handles the API's role according to `SERMONIZE_APP_ROLE_MODE` (below);
 5. checks that `DATABASE_APP_URL` connects.
+
+#### Database roles
+
+`SERMONIZE_APP_ROLE_MODE` has two values:
+
+- **`app`** (default, both setups): the API connects as the least-privileged `sermonize_app`
+  ([`sql/roles.sql`](../packages/api/sql/roles.sql): no table access in `private`, no ownership, so it cannot
+  disable triggers or alter tables). `DATABASE_APP_URL` must use the user `sermonize_app`.
+- **`owner`**: the API connects as the schema owner (`DATABASE_APP_URL` = `DATABASE_OWNER_URL`); migrate does
+  nothing with roles and logs a warning. **Weaker isolation**: the API may then alter tables, disable triggers
+  and read `private` directly, so the database no longer enforces immutability and the PII boundary against an
+  API compromise. Use it only when no role can be created.
+
+Any other value stops migrate.
+
+In `app` mode migrate looks at the database and takes one of four paths; the log says which:
+
+| situation | what migrate does | typical for |
+|---|---|---|
+| `sermonize_app` missing, the owner may create roles (superuser, or `CREATEROLE`) | `roles.sql` creates the role and grants, `GRANT CONNECT`, password from `DATABASE_APP_URL` | first start with the bundled db; a shared server where the owner has `CREATEROLE` |
+| `sermonize_app` exists and the owner can manage it (superuser, or `CREATEROLE` **and** `ADMIN OPTION` on it) | grants (`roles.sql`), `GRANT CONNECT`, and **syncs the password** from `DATABASE_APP_URL` | every later start of the two cases above |
+| `sermonize_app` exists and the owner cannot manage it (an administrator created it) | grants and `GRANT CONNECT` only; **the role and its password are left unchanged** (the log says how to rotate) | shared server with a pre-created role |
+| `sermonize_app` missing, the owner may not create roles | stops with the one-time SQL for an administrator (below) | shared server, nothing prepared yet |
+
+The password is read by psql from the environment (`\getenv`) and quoted by psql (`:'var'`); it never appears on a
+command line and must be at least 16 characters. The grants are the owner's to give (it owns the tables), so
+they are re-applied on every run, also for a role an administrator created.
+
+**PostgreSQL ≥ 16 and `CREATEROLE`.** Since PostgreSQL 16 a non-superuser with `CREATEROLE` can only alter,
+drop and change the password of roles on which it holds `ADMIN OPTION`, and it receives `ADMIN OPTION`
+automatically on every role it creates. So an owner with `CREATEROLE` can create and manage its own
+`sermonize_app` but cannot touch other applications' roles or superusers: granting it is safe. migrate checks
+this with `pg_has_role(current_user, 'sermonize_app', 'USAGE WITH ADMIN OPTION')`. (On PostgreSQL ≤ 15,
+`CREATEROLE` could alter any non-superuser role; there migrate sets the password when it creates the role and
+leaves it unchanged afterwards, since the owner holds no `ADMIN OPTION`.)
+
+**When the owner may not create roles**, migrate stops and an administrator (superuser) does one of these once:
+
+```sql
+-- a) let the owner create roles; migrate then creates sermonize_app and keeps its password in sync
+ALTER ROLE sermonize_user CREATEROLE;
+
+-- b) or create the role with the password from DATABASE_APP_URL; migrate then applies the grants only
+CREATE ROLE sermonize_app LOGIN PASSWORD '<password from DATABASE_APP_URL>';
+GRANT CONNECT ON DATABASE sermonize_db TO sermonize_app;
+```
+
+`init-env.sh` prints both with the generated password for an external database. migrate prints the same SQL
+with a placeholder (it does not write the password into its logs).
+
+**Rotating the password.**
+
+- migrate manages the role (it created it, or the owner is a superuser): generate a new password
+  (`openssl rand -hex 32`), put it into `DATABASE_APP_URL` in `deploy/.env`, `docker compose up -d`. migrate sets
+  it before the API restarts.
+- An administrator created the role: they run `ALTER ROLE sermonize_app PASSWORD '<new>';`, then update
+  `DATABASE_APP_URL` and `docker compose up -d`. If `DATABASE_APP_URL` does not match, migrate's final
+  connection check fails and says so. Alternatively, if the owner has `CREATEROLE`, a superuser can drop the role
+  (`DROP OWNED BY sermonize_app; DROP ROLE sermonize_app;` in `sermonize_db`) and the next run recreates it,
+  after which migrate manages it.
+
+Role names are cluster-wide: one `sermonize_app` per PostgreSQL server (one Sermonize database per server).
+The `REVOKE CREATE ON SCHEMA public FROM PUBLIC` in `roles.sql` needs the owner to own the `public` schema,
+which is the case on PostgreSQL ≥ 15 for the database owner.
+
+`deploy/tests/migrate-roles.sh` tests these paths against a throwaway PostgreSQL ≥ 16 server with pgvector
+(superuser owner, `CREATEROLE` owner with password sync, owner without `CREATEROLE`, pre-created role, `owner`
+mode, an unknown mode). It creates and drops `smz_mt_*` databases and roles and the cluster-wide
+`sermonize_app`; CI runs it in the tools image.
 
 If `up` stops at migrate, read `docker compose logs migrate`, fix the cause, run `docker compose up -d` again.
 Migrations are forward-only: to roll back, restore the backup taken before the update and start the
@@ -310,7 +362,7 @@ the tools profile by itself.
       Every secret was generated (`init-env.sh`), none reused.
 - [ ] **Registration stays off** (`REGISTRATION_OPEN=false`) unless you want public sign-ups; if on,
       `REGISTRATION_DEFAULT_ROLE=reader`.
-- [ ] The API uses `sermonize_app` (`managed` or `external`), not the owner, unless you accepted `owner` mode.
+- [ ] The API uses `sermonize_app` (`app` mode), not the owner, unless you accepted `owner` mode.
 - [ ] Consider the **admin allowlist** (Setup A: `/etc/nginx/sermonize/admin-allow.conf`; Setup B:
       `ADMIN_ALLOW_CIDRS`).
 - [ ] Only the proxy is reachable from outside: Setup A publishes the containers on `127.0.0.1` only (Docker's
@@ -338,13 +390,15 @@ database.
 1. **Install** Docker (Engine ≥ 24, Compose ≥ 2.20), nginx and certbot:
    `sudo apt install nginx certbot python3-certbot-nginx`. Open 80 and 443
    (`ufw allow OpenSSH && ufw allow 'Nginx Full' && ufw enable`).
-2. **Get the code** and create the settings (bundled PostgreSQL, `managed` role mode):
+2. **Get the code** and create the settings (bundled PostgreSQL, whose superuser owner lets migrate create
+   `sermonize_app`):
    ```sh
    sudo git clone https://github.com/jsilvanus/sermonize.git /opt/sermonize && cd /opt/sermonize/deploy
    sudo sh scripts/init-env.sh host-nginx sermonize.example.org
    ```
    External database instead: `DB=external DB_OWNER_URL=postgres://owner:pw@db.example.org:5432/sermonize
-   sh scripts/init-env.sh host-nginx …` (role mode `external` by default; see the table above). A PostgreSQL
+   sh scripts/init-env.sh host-nginx …` (it prints what an administrator may have to run for `sermonize_app`;
+   see [Database roles](#database-roles)). A PostgreSQL
    on the same host is `host.docker.internal` (Docker's host gateway, usually `172.17.0.1`): it must listen
    there and allow `SERMONIZE_EDGE_SUBNET` in `pg_hba.conf`.
 3. **Images and start**:
@@ -418,19 +472,29 @@ they could choose the address web/mcp/api rate-limit by, nothing more.
 2. **Database**: `DB_USER=$DB_USER DB_PASSWORD=$DB_PASSWORD ./scripts/add-app.sh sermonize <strong-password>`
    (or the `Database – Create App User` workflow) → role `sermonize_user`, database `sermonize_db`. Use a
    hex password (`openssl rand -hex 32`) or percent-encode it in the URL.
-3. **pgvector** (superuser, once; the shared Postgres image must ship pgvector, e.g.
-   `pgvector/pgvector:0.8.1-pg16`):
+3. **pgvector** in the shared server: the server image must have it installed. infra's database currently runs
+   the official `postgres:16` image, which does **not** include pgvector: it needs the package
+   `postgresql-16-pgvector` installed in the image (or the `pgvector/pgvector:0.8.1-pg16` image). Then, as a
+   superuser, once:
    ```sh
    docker compose -f infra/database/docker-compose.yml exec postgres \
      psql -U "$DB_USER" -d sermonize_db -c 'CREATE EXTENSION IF NOT EXISTS vector'
    ```
-4. **API role** (recommended, `external` mode): as a superuser/`CREATEROLE` role, with the password from
-   `DATABASE_APP_URL` (step 2 below prints it):
+4. **API role** (`app` mode, the default). `add-app.sh` currently creates `sermonize_user` as a plain `LOGIN`
+   role (no `CREATEROLE`) and runs `REVOKE ALL ON DATABASE sermonize_db FROM PUBLIC`, so `sermonize_app` needs an
+   explicit `GRANT CONNECT` (migrate gives it, or the administrator below). As a superuser, **one** of:
    ```sql
+   -- a) recommended: sermonize_user may create roles (PostgreSQL >= 16: only manage the ones it creates);
+   --    migrate creates sermonize_app and keeps its password in sync with DATABASE_APP_URL
+   ALTER ROLE sermonize_user CREATEROLE;
+   -- b) or pre-create the role, with the password from DATABASE_APP_URL (app step 1 below prints it);
+   --    migrate applies the grants only and never changes the role or its password
    CREATE ROLE sermonize_app LOGIN PASSWORD '<password>';
    GRANT CONNECT ON DATABASE sermonize_db TO sermonize_app;
    ```
-   Without it, use `SERMONIZE_APP_ROLE_MODE=owner` and `DATABASE_APP_URL` = `DATABASE_OWNER_URL` (weaker isolation).
+   Without either, use `SERMONIZE_APP_ROLE_MODE=owner` and `DATABASE_APP_URL` = `DATABASE_OWNER_URL` (weaker isolation).
+   An infra change that adds pgvector and options for extensions and `CREATEROLE` to `add-app.sh` is being
+   handled separately in `riksunsrk/infra`; until it lands, steps 3 and 4 are manual.
 5. **No object storage**: Sermonize stores no uploads, so skip `add-app-storage.sh`.
 6. **Metrics (open item)**: riksunsrk apps are expected to expose a bearer-gated (`METRICS_BEARER_TOKEN`)
    Prometheus `/metrics` endpoint. Sermonize does not have one yet, so skip the scrape job and
@@ -446,11 +510,11 @@ they could choose the address web/mcp/api rate-limit by, nothing more.
    DB_OWNER_URL=postgres://sermonize_user:<password>@pg.shared.local:5432/sermonize_db \
      sh scripts/init-env.sh traefik sermonize.example.org
    ```
-   Check `TRAEFIK_TRUSTED_CIDR`; hand the printed `CREATE ROLE` lines to the infra administrator (onboarding step 4).
+   Check `TRAEFIK_TRUSTED_CIDR`; hand the printed SQL (option a or b) to the infra administrator (onboarding step 4).
 2. Images: `docker compose build`, or `SERMONIZE_IMAGE_PREFIX=ghcr.io/jsilvanus/sermonize`,
    `SERMONIZE_TAG=vX.Y.Z` in `.env` and `docker compose pull`.
 3. Start: `docker compose up -d --wait` (add `--no-build` with pulled images). migrate stops with an
-   explicit message if pgvector or `sermonize_app` is missing.
+   explicit message (and the SQL to run) if pgvector or `sermonize_app` is missing.
 4. First admin: `sh scripts/bootstrap-admin.sh you@example.org "Your Name"`, then `sermonize-admin`
    against `https://sermonize.example.org/api`.
 5. Verify: `curl -I https://sermonize.example.org` and the [checks](#checks-after-a-deployment); backups in cron.

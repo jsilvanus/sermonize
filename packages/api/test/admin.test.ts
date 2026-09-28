@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { hashToken } from '../src/lib/tokens.js';
-import { api, createUser, setupTestApp, type TestContext, type TestUser } from './helpers.js';
+import { AUDIT_ORDER, api, createUser, setupTestApp, type TestContext, type TestUser } from './helpers.js';
 
 describe('admin routes', () => {
   let ctx: TestContext;
@@ -42,7 +42,7 @@ describe('admin routes', () => {
 
     const audit = await ctx.pool.query(
       `SELECT action, entity_type, actor_id, request_id, changes FROM audit_event
-        WHERE entity_id = $1 ORDER BY occurred_at, id`,
+        WHERE entity_id = $1 ORDER BY ${AUDIT_ORDER}`,
       [user.id],
     );
     expect(audit.rows.map((r) => [r.action, r.entity_type])).toEqual([
@@ -101,7 +101,7 @@ describe('admin routes', () => {
     expect((await api(ctx.app, issued.token, { method: 'GET', url: '/me' })).statusCode).toBe(401);
 
     const audit = await ctx.pool.query(
-      `SELECT action, changes FROM audit_event WHERE entity_type = 'api_token' AND entity_id = $1 ORDER BY occurred_at, id`,
+      `SELECT action, changes FROM audit_event WHERE entity_type = 'api_token' AND entity_id = $1 ORDER BY ${AUDIT_ORDER}`,
       [issued.id],
     );
     expect(audit.rows.map((r) => r.action)).toEqual(['token_create', 'token_revoke']);

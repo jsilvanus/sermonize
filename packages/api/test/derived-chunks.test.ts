@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { api, asSystem, createUser, setupTestApp, type TestContext, type TestUser } from './helpers.js';
+import { AUDIT_ORDER, api, asSystem, createUser, setupTestApp, type TestContext, type TestUser } from './helpers.js';
 
 const sha256 = (s: string) => createHash('sha256').update(s, 'utf8').digest('hex');
 const producer = { tool: 'chunker', version: '1.2.3', parameters: { window: 2 } };
@@ -256,7 +256,7 @@ describe('segmentations and chunks', () => {
       // One batch_insert audit event per inserting request.
       const audit = await ctx.pool.query(
         `SELECT actor_id, batch_count, request_id, changes FROM audit_event
-          WHERE action = 'batch_insert' AND entity_type = 'chunk' AND entity_id = $1 ORDER BY occurred_at, id`,
+          WHERE action = 'batch_insert' AND entity_type = 'chunk' AND entity_id = $1 ORDER BY ${AUDIT_ORDER}`,
         [seg.id],
       );
       expect(audit.rows).toHaveLength(2);

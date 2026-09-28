@@ -75,7 +75,7 @@ services:
     logging: *logging
 
   # One-off, on every `up`: pgvector check, migrations as the schema owner, then the app role according to
-  # SERMONIZE_APP_ROLE_MODE (managed | external | owner; see deploy/scripts/migrate.sh). Idempotent.
+  # SERMONIZE_APP_ROLE_MODE (app | owner; see deploy/scripts/migrate.sh). Idempotent.
   migrate:
     build:
       <<: *build
@@ -86,7 +86,7 @@ services:
     environment:
       DATABASE_OWNER_URL: ${DATABASE_OWNER_URL:?set DATABASE_OWNER_URL in deploy/.env}
       DATABASE_APP_URL: ${DATABASE_APP_URL:?set DATABASE_APP_URL in deploy/.env}
-      SERMONIZE_APP_ROLE_MODE: ${SERMONIZE_APP_ROLE_MODE:-managed}
+      SERMONIZE_APP_ROLE_MODE: ${SERMONIZE_APP_ROLE_MODE:-app}
     depends_on: *db-depends
     networks:
       - backend

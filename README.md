@@ -12,7 +12,9 @@ publishes its OpenAPI document at `/docs` (Swagger UI) and `/docs/json`.
 [`docs/deployment.md`](docs/deployment.md) describes the production deployment (Docker Compose, one domain:
 web UI at `/`, API at `/api/`, MCP at `/mcp`) in two setups: behind nginx installed on the host, or behind
 the shared Traefik and PostgreSQL of the riksunsrk infrastructure. Prebuilt images are published to
-`ghcr.io/jsilvanus/sermonize-{api,mcp,web,tools}` for `v*` tags.
+`ghcr.io/jsilvanus/sermonize-{api,mcp,web,tools}` for `v*` tags. The API connects as the least-privileged `sermonize_app`
+(`SERMONIZE_APP_ROLE_MODE=app`, the default), which the migrate service creates or adopts depending on what the
+database owner may do; see [Database roles](docs/deployment.md#database-roles).
 
 ## Repository layout
 
@@ -87,9 +89,8 @@ API token kinds (all are rows of `private.api_token`, stored as SHA-256 hashes, 
 |---|---|---|---|
 | web session | `web` | `POST /auth/login` (default `client: "web"`), via the web sign-in form | `LOGIN_TOKEN_TTL_HOURS` (12 h); revoked at sign-out |
 | MCP grant | `mcp` | `POST /auth/login` with `client: "mcp"`, via the MCP OAuth sign-in page | `MCP_LOGIN_TOKEN_TTL_HOURS` (720 h = 30 days); revoked when the OAuth grant ends |
-| admin CLI | `cli` | `sermonize-admin login` (`POST /auth/login` with `client: "cli"`, since `0005`) | `CLI_LOGIN_TOKEN_TTL_HOURS` (12 h); revoked by `sermonize-admin logout` |
+| admin CLI | `cli` | `sermonize-admin login` (`POST /auth/login` with `client: "cli"`) | `CLI_LOGIN_TOKEN_TTL_HOURS` (12 h); revoked by `sermonize-admin logout` |
 | script / service | chosen by the admin | `sermonize-admin tokens create`, `npm run cli -- create-token` or `POST /admin/users/:id/tokens` | chosen by the admin (may be unlimited) |
-| (before `0004`) | `login` | `POST /auth/login` | `LOGIN_TOKEN_TTL_HOURS` |
 
 Roles (`reader < contributor < curator < admin`) belong to the account, so a user has the same permissions in
 the web UI, through MCP tools and with scripts. Disabling a user or revoking a token takes effect at once
@@ -361,7 +362,7 @@ Access level covers derived data too: chunks and embeddings of restricted texts 
 **audit_event**
 - id, occurred_at, actor_id, action (`insert | update | delete | withdraw | batch_insert | status_change |
   token_create | token_revoke | pii_update | password_set | pii_read`; `delete` only for the replaceable join tables;
-  `pii_read` (since `0005`) records that an admin listed accounts with their PII: the number of rows and the filter
+  `pii_read` records that an admin listed accounts with their PII: the number of rows and the filter
   names, never the search text or the values),
   entity_type, entity_id NULL, batch_count NULL, request_id, changes jsonb
 - Row-level for curated tables. One event per batch for bulk derived data (chunks, embeddings, clusters,
@@ -504,11 +505,11 @@ Clustering, label and provenance details (added in Phase 4):
 
 Admin (all need `admin`; used by `sermonize-admin`):
 - `POST /admin/users`, `POST /admin/users/:id/tokens`, `DELETE /admin/tokens/:id`
-  (since `0003`, an email already used by another account, case-insensitively, is a 409 `conflict`)
+  (an email already used by another account, case-insensitively, is a 409 `conflict`)
 - CLI: `npm run cli -- create-user`, `create-token`, `revoke-token`, `migrate`, `create-index <embedding_space_id>`,
   `drop-index <embedding_space_id>`
 
-Account administration (added with `@sermonize/cli`, migration `0005_admin_user_management`). Admins manage accounts,
+Account administration (used by `@sermonize/cli`). Admins manage accounts,
 so these responses include the account PII (`email`, `display_name`), read through the SECURITY DEFINER function
 `private.admin_list_users` (which checks for an active admin and writes a `pii_read` audit event). Password hashes and
 token hashes are never returned; a token's plaintext only once, when it is created.
@@ -528,7 +529,7 @@ token hashes are never returned; a token's plaintext only once, when it is creat
 - `GET /admin/users/:id/tokens` → `{ items: [{ id, name, created_by, created_at, expires_at, revoked_at, state }] }`
   (`state`: `active | expired | revoked`). Last use is not tracked.
 
-Password accounts and statistics (added with `@sermonize/web`, migration `0003_password_auth`):
+Password accounts and statistics (used by `@sermonize/web`):
 - `GET /auth/config` (public) → `{ registration_open, password_min_length: 12, password_max_length: 256 }`.
 - `POST /auth/register` (public) `{ email, password, display_name? }` → `201 { user_id, role }` (no token).
   403 `registration_closed` unless `REGISTRATION_OPEN=true`. Password 12–256 characters (code points), else 400.
@@ -536,9 +537,9 @@ Password accounts and statistics (added with `@sermonize/web`, migration `0003_p
   Creates an active `human` user with `REGISTRATION_DEFAULT_ROLE`, its `user_pii` and an argon2id `password_credential`.
 - `POST /auth/login` (public) `{ email, password, client? }` → `{ token, expires_at, user_id, role }`: a new API
   token named after `client` — `"web"` (default) expiring after `LOGIN_TOKEN_TTL_HOURS` (default 12), or `"mcp"`
-  (used by `@sermonize/mcp`) expiring after `MCP_LOGIN_TOKEN_TTL_HOURS` (default 720 = 30 days), or `"cli"` (since
-  `0005`, used by `sermonize-admin login`) expiring after `CLI_LOGIN_TOKEN_TTL_HOURS` (default 12); any other value
-  is a 400. (Tokens issued before migration `0004` are named `login`.) Every failure (unknown email, wrong password,
+  (used by `@sermonize/mcp`) expiring after `MCP_LOGIN_TOKEN_TTL_HOURS` (default 720 = 30 days), or `"cli"`
+  (used by `sermonize-admin login`) expiring after `CLI_LOGIN_TOKEN_TTL_HOURS` (default 12); any other value
+  is a 400. Every failure (unknown email, wrong password,
   disabled user, user without a password) is the same 401 `invalid_credentials`; unknown emails still run an
   argon2 verification against a dummy hash, and the status is checked only after verification.
 - `POST /auth/logout` (any authenticated caller) revokes the token used for the request → 204.
@@ -630,12 +631,12 @@ role. `sql/roles.sql` is an idempotent ops script (not a migration) that creates
 and grants it: `SELECT/INSERT/UPDATE` on public tables (immutability is enforced by triggers),
 `DELETE` only on `work_person`, `text_person` and `sermon_occasion`, `SELECT/INSERT` only on
 `audit_event`, and no table privileges in `private` (only `EXECUTE` on the `SECURITY DEFINER`
-functions `private.resolve_token`, `create_api_token`, `revoke_api_token`, `set_user_pii`, and since `0003`
-`register_user`, `get_password_credential`, `create_login_token`, `revoke_own_token`, and since `0005`
-`admin_list_users`, `admin_list_tokens`, `admin_update_user_pii`, `admin_set_password`, which require an active admin). The admin functions check for
-an active admin principal; the `0003` ones need none but each does one narrow thing (register only readers/contributors;
-look up a credential; store a `web` or `mcp` login token (since `0004`; `login` before) with a future expiry for an
-active user with a password; revoke the
+functions `private.resolve_token`, `create_api_token`, `revoke_api_token`, `set_user_pii`,
+`register_user`, `get_password_credential`, `create_login_token`, `revoke_own_token`,
+`admin_list_users`, `admin_list_tokens`, `admin_update_user_pii`, `admin_set_password`). The admin functions
+(`create_api_token`, `revoke_api_token`, `set_user_pii`, `admin_*`) check for an active admin principal; the
+self-service ones need none but each does one narrow thing (register only readers/contributors; look up a credential;
+store a `web`, `mcp` or `cli` login token with a future expiry for an active user with a password; revoke the
 caller's own token). `get_password_credential` returns password hashes to the application role, since verification
 happens in Node.
 Re-run it after every migration that adds tables or functions:
@@ -644,6 +645,10 @@ Re-run it after every migration that adds tables or functions:
 psql "$OWNER_DATABASE_URL" -v ON_ERROR_STOP=1 -f packages/api/sql/roles.sql
 psql "$OWNER_DATABASE_URL" -c "ALTER ROLE sermonize_app PASSWORD '…'"
 ```
+
+In the Docker deployment the `migrate` service does this on every start (and creates the role, sets its password
+or leaves an administrator's role alone, depending on the owner's rights): see
+[`docs/deployment.md`, Database roles](docs/deployment.md#database-roles).
 
 ### Database-enforced rules
 
@@ -657,23 +662,12 @@ whose dimension differs from their space, and memberships whose embedding is in 
 Trigger errors use SQLSTATEs `SZ002` (→ 409 `immutable`), `SZ003` (→ 409 `conflict`) and
 `SZ004` (→ 422 `validation_failed`).
 
-Migration `0002_clustering_completion` adds the completion rules: `cluster.size` may only be filled once
-(NULL → value) while the run is open; `open → complete` requires at least one membership, rejects sizes that
-differ from the membership counts (`cluster_subtree_counts(run)`), and fills NULL sizes; `withdrawn_reason`
-can only be set by the withdraw transition.
+Clustering runs: `cluster.size` may only be filled once (NULL → value) while the run is open; `open → complete`
+requires at least one membership, rejects sizes that differ from the membership counts (`cluster_subtree_counts(run)`),
+and fills NULL sizes; `withdrawn_reason` can only be set by the withdraw transition.
 
-Migration `0003_password_auth` adds `private.password_credential`, a unique index on `lower(user_pii.email)` and the
-self-service auth functions described above.
-
-Migration `0004_login_token_client` replaces `private.create_login_token(uuid, text, timestamptz)` with
-`create_login_token(uuid, text, timestamptz, text)`: the last argument is the client (`web` or `mcp`), which becomes
-the token name and is recorded in the `token_create` audit event. It re-grants `EXECUTE` to `sermonize_app` when that
-role exists, so a running deployment keeps working before `roles.sql` is re-run (which lists the new signature).
-
-Migration `0005_admin_user_management` adds the admin functions behind `GET/PATCH /admin/users…`, `PUT
-/admin/users/:id/password` and `GET /admin/users/:id/tokens` (see the API section), and lets `create_login_token`
-accept the client `cli`. It grants `EXECUTE` on the new functions to `sermonize_app` when that role exists; re-run
-`roles.sql` anyway.
+Accounts: `private.password_credential` holds one argon2id hash per user, emails in `private.user_pii` are unique
+case-insensitively, and the login token's name (`web`, `mcp` or `cli`) is recorded in the `token_create` audit event.
 
 ## Explicit non-goals for v1
 

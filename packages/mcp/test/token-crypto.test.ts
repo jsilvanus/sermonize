@@ -3,7 +3,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { describe, expect, it } from 'vitest';
 import { SqliteGrantStore } from '../src/storage/grants.js';
 import type { NewGrant } from '../src/storage/interface.js';
-import { migrateSchema, openDatabase, SCHEMA_VERSION } from '../src/storage/sqlite.js';
+import { initSchema, openDatabase, SCHEMA_VERSION } from '../src/storage/sqlite.js';
 import { decryptToken, encryptToken, parseTokenKey } from '../src/token-crypto.js';
 
 const key = randomBytes(32);
@@ -117,24 +117,15 @@ describe('SqliteGrantStore', () => {
 });
 
 describe('SQLite schema', () => {
-  it('replaces the old MCP user/token tables of a pre-grant database', () => {
+  it('creates the schema in a new file and refuses unknown versions', () => {
     const db = new DatabaseSync(':memory:');
-    db.exec(
-      'CREATE TABLE users (id TEXT PRIMARY KEY, name TEXT NOT NULL, email TEXT UNIQUE, password_hash TEXT, created_at INTEGER NOT NULL);' +
-        'CREATE TABLE authorization_codes (code TEXT PRIMARY KEY, client_id TEXT NOT NULL, redirect_uri TEXT NOT NULL, challenge TEXT NOT NULL, subject TEXT NOT NULL, scope TEXT NOT NULL, expires INTEGER NOT NULL);' +
-        'CREATE TABLE refresh_tokens (token TEXT PRIMARY KEY, client_id TEXT NOT NULL, subject TEXT NOT NULL, scope TEXT NOT NULL, expires INTEGER NOT NULL);' +
-        'CREATE TABLE sermonize_api_tokens (user_id TEXT PRIMARY KEY, ciphertext TEXT NOT NULL, updated_at INTEGER NOT NULL);' +
-        "INSERT INTO users VALUES ('demo-user', 'Demo', 'demo@example.com', '$argon2id$x', 0);" +
-        "INSERT INTO refresh_tokens VALUES ('old-rt', 'c', 'demo-user', 'mcp', 9999999999999);",
-    );
-    migrateSchema(db);
+    initSchema(db);
     const tables = db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name").all().map((r) => (r as { name: string }).name);
     expect(tables).toEqual(['authorization_codes', 'grants', 'refresh_tokens']);
-    expect(db.prepare('SELECT count(*) AS n FROM refresh_tokens').get()).toEqual({ n: 0 });
     expect(db.prepare('PRAGMA user_version').get()).toEqual({ user_version: SCHEMA_VERSION });
-    migrateSchema(db); // idempotent
+    initSchema(db); // idempotent
     db.exec('PRAGMA user_version = 99');
-    expect(() => migrateSchema(db)).toThrow(/newer/);
+    expect(() => initSchema(db)).toThrow(/schema version 99/);
     db.close();
   });
 });

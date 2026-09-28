@@ -22,6 +22,14 @@ import { TEST_DATABASE_URL } from './db-url.js';
 
 export { TEST_DATABASE_URL, SYSTEM_PRINCIPAL };
 
+/**
+ * `ORDER BY` for audit_event rows in tests. Rows written in one transaction share `occurred_at` (the
+ * transaction time) and their UUIDv7 ids are not ordered within a millisecond, so the order of rows
+ * within one transaction is not meaningful: they are sorted by what the assertions compare (action,
+ * entity type, changes), which is deterministic. Transactions themselves stay in time order.
+ */
+export const AUDIT_ORDER = 'occurred_at, action, entity_type, changes::text, id';
+
 export interface TestContext {
   app: App;
   pool: Pool;

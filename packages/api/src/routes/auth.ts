@@ -49,7 +49,7 @@ const LoginBody = Type.Object({
 const authErrors = { ...errorResponses, 429: ErrorResponse };
 
 /**
- * Self-service password accounts (migration 0003):
+ * Self-service password accounts (private.register_user etc. in the migration):
  *   GET  /auth/config    public: whether registration is open, password rules
  *   POST /auth/register  public, REGISTRATION_OPEN only: creates a human user with REGISTRATION_DEFAULT_ROLE
  *   POST /auth/login     public: email + password (+ client web|mcp|cli) -> expiring API token named after the client

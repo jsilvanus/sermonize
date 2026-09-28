@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { api, asSystem, createUser, expectPgError, setupTestApp, type TestContext, type TestUser } from './helpers.js';
+import { AUDIT_ORDER, api, asSystem, createUser, expectPgError, setupTestApp, type TestContext, type TestUser } from './helpers.js';
 
 const producer = { tool: 'pipeline', version: '2.1.0', commit: 'abc1234' };
 
@@ -309,7 +309,7 @@ describe('clustering, labels, reviews and provenance', () => {
 
     // Audit: batch events for clusters and memberships, status change for the run.
     const audit = await ctx.pool.query(
-      `SELECT action, entity_type, batch_count, changes FROM audit_event WHERE entity_id = $1 ORDER BY occurred_at, id`,
+      `SELECT action, entity_type, batch_count, changes FROM audit_event WHERE entity_id = $1 ORDER BY ${AUDIT_ORDER}`,
       [run.id],
     );
     expect(audit.rows.map((r) => [r.action, r.entity_type, r.batch_count])).toEqual([

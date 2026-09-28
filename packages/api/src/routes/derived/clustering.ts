@@ -571,7 +571,7 @@ export const clusteringRoutes: FastifyPluginAsyncTypebox<DerivedOptions> = async
             { mismatches },
           );
         }
-        // The database fills NULL sizes and re-checks everything (migration 0002).
+        // The database fills NULL sizes and re-checks everything (clustering_run_transition_check in the migration).
         await client.query(`UPDATE clustering_run SET status = 'complete' WHERE id = $1`, [id]);
         return getRun(client, id);
       });

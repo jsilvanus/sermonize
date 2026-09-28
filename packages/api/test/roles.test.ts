@@ -48,7 +48,7 @@ describe('sql/roles.sql (sermonize_app)', () => {
       await client.query('ROLLBACK TO SAVEPOINT s');
       const cred = await client.query('SELECT user_id, role, status FROM private.get_password_credential($1)', ['ROLES-TEST@example.org']);
       expect(cred.rows).toEqual([{ user_id: rows[0].id, role: 'reader', status: 'active' }]);
-      // 0004: login tokens are named after the client, web or mcp only.
+      // Login tokens are named after the client (web, mcp or cli).
       await client.query(`SELECT private.create_login_token($1, $2, now() + interval '1 hour', 'mcp')`, [rows[0].id, 'a'.repeat(64)]);
       await client.query('SAVEPOINT t');
       await expectPgError(
@@ -87,7 +87,7 @@ describe('sql/roles.sql (sermonize_app)', () => {
     }
   });
 
-  it('can call the 0005 admin functions, which require an active admin principal', async () => {
+  it('can call the admin user-management functions, which require an active admin principal', async () => {
     const calls = [
       'SELECT * FROM private.admin_list_users(null, null, null, null, null, null, null, 10)',
       `SELECT * FROM private.admin_list_tokens('${user.id}')`,

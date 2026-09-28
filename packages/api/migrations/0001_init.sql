@@ -1,4 +1,4 @@
--- Sermonize v1 schema. See README.md (spec) and docs/implementation-plan.md.
+-- Sermonize schema. See README.md (spec) and docs/implementation-plan.md.
 --
 -- Custom SQLSTATEs raised by triggers (mapped to HTTP errors by the API):
 --   SZ001  no authenticated principal (app.user_id not set)       -> 500 (server bug)
@@ -608,7 +608,9 @@ CREATE TABLE clustering_run (
   metadata            jsonb NOT NULL DEFAULT '{}' CHECK (jsonb_typeof(metadata) = 'object'),
   created_by          uuid NOT NULL REFERENCES app_user ON DELETE RESTRICT,
   created_at          timestamptz NOT NULL,
-  CHECK (status <> 'complete' OR completed_at IS NOT NULL)
+  withdrawn_reason    text,  -- set only by the withdraw transition
+  CHECK (status <> 'complete' OR completed_at IS NOT NULL),
+  CONSTRAINT clustering_run_withdrawn_reason_check CHECK (withdrawn_reason IS NULL OR status = 'withdrawn')
 );
 CREATE INDEX clustering_run_space_idx ON clustering_run (embedding_space_id);
 CREATE INDEX clustering_run_status_idx ON clustering_run (status);
@@ -646,7 +648,7 @@ CREATE TABLE cluster (
   clustering_run_id  uuid NOT NULL REFERENCES clustering_run ON DELETE RESTRICT,
   cluster_number     integer NOT NULL,
   centroid           vector,
-  size               integer CHECK (size >= 0),
+  size               integer CHECK (size >= 0),  -- see cluster_subtree_counts()
   parent_cluster_id  uuid,
   metadata           jsonb NOT NULL DEFAULT '{}' CHECK (jsonb_typeof(metadata) = 'object'),
   created_by         uuid NOT NULL REFERENCES app_user ON DELETE RESTRICT,
@@ -674,6 +676,94 @@ CREATE TABLE cluster_membership (
 );
 CREATE INDEX cluster_membership_embedding_idx ON cluster_membership (embedding_id);
 CREATE INDEX cluster_membership_cluster_idx ON cluster_membership (cluster_id);
+
+-- `cluster.size` is the number of memberships assigned to the cluster or to any
+-- of its descendant clusters (for a flat clustering: its direct members). It may
+-- be given on insert or left NULL; completing the run fills NULL sizes from the
+-- memberships and rejects sizes that disagree with them.
+--
+-- Membership count of every cluster of a run, including descendants.
+CREATE FUNCTION cluster_subtree_counts(p_run uuid)
+RETURNS TABLE (cluster_id uuid, cluster_number integer, size integer, member_count integer)
+LANGUAGE sql STABLE AS $$
+  WITH RECURSIVE tree (root_id, id) AS (
+    SELECT c.id, c.id FROM cluster c WHERE c.clustering_run_id = p_run
+    UNION ALL
+    SELECT t.root_id, c.id
+      FROM tree t JOIN cluster c ON c.parent_cluster_id = t.id AND c.clustering_run_id = p_run
+  ) CYCLE id SET is_cycle USING path,
+  direct AS (
+    SELECT m.cluster_id, count(*)::integer AS n
+      FROM cluster_membership m
+     WHERE m.clustering_run_id = p_run AND m.cluster_id IS NOT NULL
+     GROUP BY m.cluster_id
+  )
+  SELECT c.id, c.cluster_number, c.size, coalesce(sum(d.n), 0)::integer
+    FROM cluster c
+    JOIN tree t ON t.root_id = c.id AND NOT t.is_cycle
+    LEFT JOIN direct d ON d.cluster_id = t.id
+   WHERE c.clustering_run_id = p_run
+   GROUP BY c.id, c.cluster_number, c.size
+$$;
+
+-- cluster: insert-only except filling `size` once while the run is open.
+CREATE FUNCTION cluster_guard_mutation() RETURNS trigger
+LANGUAGE plpgsql AS $$
+BEGIN
+  IF TG_OP = 'DELETE' THEN
+    RAISE EXCEPTION 'cluster records cannot be deleted' USING ERRCODE = 'SZ002';
+  END IF;
+  IF (to_jsonb(NEW) - 'size') IS DISTINCT FROM (to_jsonb(OLD) - 'size') THEN
+    RAISE EXCEPTION 'cluster records are immutable (only a NULL size can be filled while the run is open)'
+      USING ERRCODE = 'SZ002';
+  END IF;
+  IF NEW.size IS DISTINCT FROM OLD.size THEN
+    IF OLD.size IS NOT NULL THEN
+      RAISE EXCEPTION 'size of cluster % is already set', OLD.cluster_number USING ERRCODE = 'SZ002';
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM clustering_run WHERE id = NEW.clustering_run_id AND status = 'open') THEN
+      RAISE EXCEPTION 'cluster sizes can only be set while the clustering run is open' USING ERRCODE = 'SZ003';
+    END IF;
+  END IF;
+  RETURN NEW;
+END $$;
+
+-- Runs after c_status_guard (which validates the transition itself). open ->
+-- complete requires at least one membership, fills NULL cluster sizes and checks
+-- the given ones; withdrawn_reason can only be set by withdrawing the run.
+CREATE FUNCTION clustering_run_transition_check() RETURNS trigger
+LANGUAGE plpgsql AS $$
+DECLARE
+  bad record;
+BEGIN
+  IF NEW.withdrawn_reason IS DISTINCT FROM OLD.withdrawn_reason
+     AND NOT (OLD.status <> 'withdrawn' AND NEW.status = 'withdrawn') THEN
+    RAISE EXCEPTION 'withdrawn_reason can only be set when the run is withdrawn' USING ERRCODE = 'SZ002';
+  END IF;
+
+  IF OLD.status = 'open' AND NEW.status = 'complete' THEN
+    IF NOT EXISTS (SELECT 1 FROM cluster_membership WHERE clustering_run_id = NEW.id) THEN
+      RAISE EXCEPTION 'clustering run % has no memberships and cannot be completed', NEW.id
+        USING ERRCODE = 'SZ003';
+    END IF;
+    SELECT x.cluster_number, x.size, x.member_count INTO bad
+      FROM cluster_subtree_counts(NEW.id) x
+     WHERE x.size IS NOT NULL AND x.size <> x.member_count
+     ORDER BY x.cluster_number
+     LIMIT 1;
+    IF FOUND THEN
+      RAISE EXCEPTION 'cluster % has size % but % memberships', bad.cluster_number, bad.size, bad.member_count
+        USING ERRCODE = 'SZ003';
+    END IF;
+    -- The run row is not yet updated here, so cluster_guard_mutation() still sees it open.
+    UPDATE cluster c SET size = x.member_count
+      FROM cluster_subtree_counts(NEW.id) x
+     WHERE c.id = x.cluster_id AND c.size IS NULL;
+  END IF;
+  RETURN NEW;
+END $$;
+CREATE TRIGGER d_transition_check BEFORE UPDATE ON clustering_run
+  FOR EACH ROW EXECUTE FUNCTION clustering_run_transition_check();
 
 -- Statement-level: clusters/memberships may only be inserted while the run is open.
 -- The run rows are locked FOR SHARE, so a concurrent completion waits for (or blocks) us.
@@ -771,9 +861,9 @@ CREATE TRIGGER a_insert_only BEFORE UPDATE OR DELETE ON embedding_space
 CREATE TRIGGER a_insert_only BEFORE UPDATE OR DELETE ON embedding
   FOR EACH ROW EXECUTE FUNCTION forbid_mutation();
 CREATE TRIGGER a_insert_only BEFORE UPDATE OR DELETE ON clustering_run
-  FOR EACH ROW EXECUTE FUNCTION forbid_mutation('status', 'completed_at');
+  FOR EACH ROW EXECUTE FUNCTION forbid_mutation('status', 'completed_at', 'withdrawn_reason');
 CREATE TRIGGER a_insert_only BEFORE UPDATE OR DELETE ON cluster
-  FOR EACH ROW EXECUTE FUNCTION forbid_mutation();
+  FOR EACH ROW EXECUTE FUNCTION cluster_guard_mutation();
 CREATE TRIGGER a_insert_only BEFORE UPDATE OR DELETE ON cluster_membership
   FOR EACH ROW EXECUTE FUNCTION forbid_mutation();
 CREATE TRIGGER a_insert_only BEFORE UPDATE OR DELETE ON label
@@ -836,6 +926,18 @@ CREATE TABLE private.user_pii (
   created_at    timestamptz NOT NULL DEFAULT now(),
   updated_at    timestamptz NOT NULL DEFAULT now()
 );
+
+-- One argon2id hash (PHC string) per user; hashing and verification happen in
+-- Node (@node-rs/argon2). Emails are unique case-insensitively, so that an email
+-- identifies at most one account at login.
+CREATE TABLE private.password_credential (
+  user_id        uuid PRIMARY KEY REFERENCES public.app_user ON DELETE RESTRICT,
+  password_hash  text NOT NULL CHECK (password_hash LIKE '$argon2id$%'),
+  created_at     timestamptz NOT NULL DEFAULT now(),
+  updated_at     timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE UNIQUE INDEX user_pii_email_lower_key ON private.user_pii (lower(email)) WHERE email IS NOT NULL;
 
 -- Raises unless the current principal is an active admin (defence in depth:
 -- the API also checks roles before calling these functions).
@@ -917,6 +1019,266 @@ BEGIN
             to_jsonb(array_remove(ARRAY[CASE WHEN p_email IS NOT NULL THEN 'email' END,
                                         CASE WHEN p_display_name IS NOT NULL THEN 'display_name' END],
                                   NULL))));
+END $$;
+
+-- ---------------------------------------------------------------------------
+-- Self-service password accounts (used by the API's /auth routes), callable
+-- WITHOUT an admin principal. Each does exactly one narrow thing:
+--   register_user            create a human reader/contributor with PII and a password
+--   get_password_credential  look up the login data for an email (read-only)
+--   create_login_token       store a login token hash for a user with a password
+--   revoke_own_token         revoke the caller's own token (logout)
+--
+-- Audit actor for self-service actions: the user themself. register_user and
+-- create_login_token set app.user_id to the (new) user for the duration of the
+-- call and restore the previous value afterwards, so app_user.created_by, the
+-- token's created_by and every audit_event.actor_id are that user's pseudonymous
+-- id. Audit events never contain PII values (only field names).
+-- ---------------------------------------------------------------------------
+
+-- Creates an active human user with the given role (reader or contributor only),
+-- its PII and its password hash. Returns the new user id. A duplicate email raises
+-- unique_violation (23505) on user_pii_email_lower_key.
+--
+-- search_path includes `public` (after pg_catalog) because the app_user triggers
+-- (stamp_row, audit_row) reference public objects unqualified. roles.sql revokes
+-- CREATE on public from PUBLIC, so no untrusted role can shadow them.
+CREATE FUNCTION private.register_user(p_role text, p_email text, p_display_name text, p_password_hash text)
+RETURNS uuid
+LANGUAGE plpgsql VOLATILE SECURITY DEFINER SET search_path = pg_catalog, public, pg_temp AS $$
+DECLARE
+  new_id uuid := gen_random_uuid();
+  prev_actor text := current_setting('app.user_id', true);
+BEGIN
+  IF p_role IS NULL OR p_role NOT IN ('reader', 'contributor') THEN
+    RAISE EXCEPTION 'self-registration may only create readers or contributors' USING ERRCODE = '42501';
+  END IF;
+  IF p_email IS NULL OR length(btrim(p_email)) = 0 THEN
+    RAISE EXCEPTION 'email is required' USING ERRCODE = '22023';
+  END IF;
+  IF p_password_hash IS NULL OR p_password_hash NOT LIKE '$argon2id$%' THEN
+    RAISE EXCEPTION 'password_hash must be an argon2id PHC string' USING ERRCODE = '22023';
+  END IF;
+
+  PERFORM set_config('app.user_id', new_id::text, true);
+
+  INSERT INTO public.app_user (id, kind, role, status) VALUES (new_id, 'human', p_role, 'active');
+  INSERT INTO private.user_pii (user_id, email, display_name) VALUES (new_id, p_email, p_display_name);
+  INSERT INTO public.audit_event (action, entity_type, entity_id, changes)
+  VALUES ('pii_update', 'user_pii', new_id,
+          jsonb_build_object('fields',
+            to_jsonb(array_remove(ARRAY['email',
+                                        CASE WHEN p_display_name IS NOT NULL THEN 'display_name' END],
+                                  NULL))));
+  INSERT INTO private.password_credential (user_id, password_hash) VALUES (new_id, p_password_hash);
+  INSERT INTO public.audit_event (action, entity_type, entity_id, changes)
+  VALUES ('password_set', 'password_credential', new_id, jsonb_build_object('via', 'register'));
+
+  PERFORM set_config('app.user_id', coalesce(prev_actor, ''), true);
+  RETURN new_id;
+END $$;
+
+-- Login data for an email (case-insensitive). No row if the email is unknown or
+-- the user has no password. Status is returned so the caller can reject disabled
+-- users only AFTER verifying the hash (uniform timing).
+CREATE FUNCTION private.get_password_credential(p_email text)
+RETURNS TABLE (user_id uuid, password_hash text, role text, kind text, status text)
+LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+  SELECT u.id, c.password_hash, u.role, u.kind, u.status
+    FROM private.user_pii p
+    JOIN private.password_credential c ON c.user_id = p.user_id
+    JOIN public.app_user u ON u.id = p.user_id
+   WHERE p.email IS NOT NULL AND lower(p.email) = lower(p_email)
+$$;
+
+-- Stores the hash of a login token for an active user that has a password. The
+-- token is named after the client that asked for it ('web', 'mcp' or 'cli'), so
+-- an admin listing a user's tokens can tell them apart; each client has its own
+-- lifetime. The expiry must be in the future. The password itself is verified by
+-- the API before calling this. Actor: the user themself.
+CREATE FUNCTION private.create_login_token(p_user_id uuid, p_token_sha256 text, p_expires_at timestamptz, p_client text)
+RETURNS uuid
+LANGUAGE plpgsql VOLATILE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+DECLARE
+  prev_actor text := current_setting('app.user_id', true);
+  new_id uuid;
+BEGIN
+  IF p_client IS NULL OR p_client NOT IN ('web', 'mcp', 'cli') THEN
+    RAISE EXCEPTION 'login token client must be web, mcp or cli' USING ERRCODE = '22023';
+  END IF;
+  IF p_expires_at IS NULL OR p_expires_at <= now() THEN
+    RAISE EXCEPTION 'login tokens need a future expiry' USING ERRCODE = '22023';
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM public.app_user u JOIN private.password_credential c ON c.user_id = u.id
+                  WHERE u.id = p_user_id AND u.status = 'active') THEN
+    RAISE EXCEPTION 'no active user with a password' USING ERRCODE = '42501';
+  END IF;
+
+  PERFORM set_config('app.user_id', p_user_id::text, true);
+  INSERT INTO private.api_token (user_id, token_sha256, name, created_by, expires_at)
+  VALUES (p_user_id, p_token_sha256, p_client, p_user_id, p_expires_at)
+  RETURNING id INTO new_id;
+  INSERT INTO public.audit_event (action, entity_type, entity_id, changes)
+  VALUES ('token_create', 'api_token', new_id,
+          jsonb_build_object('user_id', p_user_id, 'expires_at', p_expires_at, 'via', 'login', 'client', p_client));
+  PERFORM set_config('app.user_id', coalesce(prev_actor, ''), true);
+  RETURN new_id;
+END $$;
+
+-- Revokes the token with this hash if it belongs to the current principal
+-- (app.user_id). Returns false if there is no such unrevoked token.
+CREATE FUNCTION private.revoke_own_token(p_token_sha256 text)
+RETURNS boolean
+LANGUAGE plpgsql VOLATILE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+DECLARE
+  actor uuid := public.app_actor_id();
+  token_id uuid;
+BEGIN
+  UPDATE private.api_token SET revoked_at = now()
+   WHERE token_sha256 = p_token_sha256 AND user_id = actor AND revoked_at IS NULL
+  RETURNING id INTO token_id;
+  IF NOT FOUND THEN
+    RETURN false;
+  END IF;
+  INSERT INTO public.audit_event (action, entity_type, entity_id, changes)
+  VALUES ('token_revoke', 'api_token', token_id, jsonb_build_object('user_id', actor, 'via', 'logout'));
+  RETURN true;
+END $$;
+
+-- ---------------------------------------------------------------------------
+-- Admin user management (GET/PATCH /admin/users, passwords, token listing).
+-- All require an active admin principal (private.require_admin()):
+--   admin_list_users       users with their PII (email, display name) and whether they
+--                          have a password; filters, keyset pagination. Writes one
+--                          `pii_read` audit event per call that returned rows (filter
+--                          names only, never the search text or PII values).
+--   admin_list_tokens      token metadata of a user (never hashes)
+--   admin_update_user_pii  partial PII update (set_user_pii overwrites both fields)
+--   admin_set_password     store an argon2id hash (hashed in Node) for a human user with
+--                          an email; optionally revoke the user's tokens
+-- ---------------------------------------------------------------------------
+
+CREATE FUNCTION private.admin_list_users(
+  p_id uuid, p_role text, p_status text, p_kind text, p_q text,
+  p_after_created_at timestamptz, p_after_id uuid, p_limit integer)
+RETURNS TABLE (id uuid, kind text, role text, status text, created_at timestamptz, updated_at timestamptz,
+               email text, display_name text, has_password boolean, sort_created_at text)
+LANGUAGE plpgsql VOLATILE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+DECLARE
+  n integer;
+BEGIN
+  PERFORM private.require_admin();
+  RETURN QUERY
+    SELECT u.id, u.kind, u.role, u.status, u.created_at, u.updated_at,
+           p.email, p.display_name, (c.user_id IS NOT NULL),
+           to_char(u.created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"')
+      FROM public.app_user u
+      LEFT JOIN private.user_pii p ON p.user_id = u.id
+      LEFT JOIN private.password_credential c ON c.user_id = u.id
+     WHERE (p_id IS NULL OR u.id = p_id)
+       AND (p_role IS NULL OR u.role = p_role)
+       AND (p_status IS NULL OR u.status = p_status)
+       AND (p_kind IS NULL OR u.kind = p_kind)
+       -- p_q is an ILIKE pattern built (and escaped) by the caller
+       AND (p_q IS NULL OR p.email ILIKE p_q OR p.display_name ILIKE p_q)
+       AND (p_after_id IS NULL OR (u.created_at, u.id) > (p_after_created_at, p_after_id))
+     ORDER BY u.created_at, u.id
+     LIMIT p_limit;
+  GET DIAGNOSTICS n = ROW_COUNT;
+  IF n > 0 THEN
+    INSERT INTO public.audit_event (action, entity_type, entity_id, batch_count, changes)
+    VALUES ('pii_read', 'user_pii', p_id, n,
+            jsonb_strip_nulls(jsonb_build_object('role', p_role, 'status', p_status, 'kind', p_kind,
+                                                 'q', CASE WHEN p_q IS NOT NULL THEN true END)));
+  END IF;
+END $$;
+
+CREATE FUNCTION private.admin_list_tokens(p_user_id uuid)
+RETURNS TABLE (id uuid, name text, created_by uuid, created_at timestamptz, expires_at timestamptz,
+               revoked_at timestamptz)
+LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+BEGIN
+  PERFORM private.require_admin();
+  RETURN QUERY
+    SELECT t.id, t.name, t.created_by, t.created_at, t.expires_at, t.revoked_at
+      FROM private.api_token t
+     WHERE t.user_id = p_user_id
+     ORDER BY t.created_at, t.id;
+END $$;
+
+-- Updates only the fields whose p_set_* flag is true (NULL clears a field).
+-- The audit event lists the changed field names, never their values.
+CREATE FUNCTION private.admin_update_user_pii(p_user_id uuid, p_set_email boolean, p_email text,
+                                              p_set_display_name boolean, p_display_name text)
+RETURNS void
+LANGUAGE plpgsql VOLATILE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+BEGIN
+  PERFORM private.require_admin();
+  IF NOT (p_set_email OR p_set_display_name) THEN
+    RETURN;
+  END IF;
+  INSERT INTO private.user_pii (user_id, email, display_name)
+  VALUES (p_user_id, CASE WHEN p_set_email THEN p_email END,
+          CASE WHEN p_set_display_name THEN p_display_name END)
+  ON CONFLICT (user_id) DO UPDATE
+    SET email = CASE WHEN p_set_email THEN EXCLUDED.email ELSE private.user_pii.email END,
+        display_name = CASE WHEN p_set_display_name THEN EXCLUDED.display_name
+                            ELSE private.user_pii.display_name END,
+        updated_at = now();
+  INSERT INTO public.audit_event (action, entity_type, entity_id, changes)
+  VALUES ('pii_update', 'user_pii', p_user_id,
+          jsonb_build_object('fields',
+            to_jsonb(array_remove(ARRAY[CASE WHEN p_set_email THEN 'email' END,
+                                        CASE WHEN p_set_display_name THEN 'display_name' END],
+                                  NULL)),
+            'via', 'admin'));
+END $$;
+
+-- Sets (or replaces) a user's password hash. Only human users with an email can
+-- have a password (they sign in with it). Optionally revokes every unrevoked token
+-- of the user. Returns the number of tokens revoked.
+CREATE FUNCTION private.admin_set_password(p_user_id uuid, p_password_hash text, p_revoke_tokens boolean)
+RETURNS integer
+LANGUAGE plpgsql VOLATILE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+DECLARE
+  user_kind text;
+  revoked_id uuid;
+  n integer := 0;
+BEGIN
+  PERFORM private.require_admin();
+  SELECT kind INTO user_kind FROM public.app_user WHERE id = p_user_id;
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'user not found' USING ERRCODE = 'SZ004';
+  END IF;
+  IF user_kind <> 'human' THEN
+    RAISE EXCEPTION 'service accounts cannot have a password (use API tokens)' USING ERRCODE = 'SZ004';
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM private.user_pii WHERE user_id = p_user_id AND email IS NOT NULL) THEN
+    RAISE EXCEPTION 'the user has no email address to sign in with; set one first' USING ERRCODE = 'SZ004';
+  END IF;
+  IF p_password_hash IS NULL OR p_password_hash NOT LIKE '$argon2id$%' THEN
+    RAISE EXCEPTION 'password_hash must be an argon2id PHC string' USING ERRCODE = '22023';
+  END IF;
+
+  INSERT INTO private.password_credential (user_id, password_hash) VALUES (p_user_id, p_password_hash)
+  ON CONFLICT (user_id) DO UPDATE SET password_hash = EXCLUDED.password_hash, updated_at = now();
+  INSERT INTO public.audit_event (action, entity_type, entity_id, changes)
+  VALUES ('password_set', 'password_credential', p_user_id,
+          jsonb_build_object('via', 'admin', 'revoke_tokens', coalesce(p_revoke_tokens, false)));
+
+  IF p_revoke_tokens THEN
+    FOR revoked_id IN
+      UPDATE private.api_token SET revoked_at = now()
+       WHERE user_id = p_user_id AND revoked_at IS NULL
+      RETURNING id
+    LOOP
+      INSERT INTO public.audit_event (action, entity_type, entity_id, changes)
+      VALUES ('token_revoke', 'api_token', revoked_id,
+              jsonb_build_object('user_id', p_user_id, 'via', 'password_set'));
+      n := n + 1;
+    END LOOP;
+  END IF;
+  RETURN n;
 END $$;
 
 REVOKE ALL ON ALL FUNCTIONS IN SCHEMA private FROM PUBLIC;

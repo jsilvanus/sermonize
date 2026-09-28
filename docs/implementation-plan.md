@@ -1,20 +1,21 @@
 # Implementation plan (v1)
 
 The spec is `README.md` (data model, API, roles). The reasoning is in
-`docs/data-model-review.md`. This plan splits v1 into **four sequential phases**, each
-small enough for one agent. Every phase ends with green checks and a commit.
+`docs/data-model-review.md`. This plan split the API (`packages/api`) into **four sequential
+phases**, each small enough for one agent; all four are done. Every phase ended with green checks
+and a commit.
 
 ## Stack and conventions (all phases)
 
 - Node.js ≥ 22, TypeScript (`strict`), **ESM only** (`"type": "module"`, `NodeNext` modules, `.js` import suffixes).
 - Fastify 5 + `@fastify/type-provider-typebox` (TypeBox schemas for every route body, params, querystring and response).
 - `pg` (node-postgres) with hand-written SQL. No ORM.
-- Migrations: plain numbered SQL files in `migrations/` (`0001_*.sql`, …), applied by a tiny runner
-  (`src/db/migrate.ts`) that records them in a `schema_migrations` table, one transaction per file.
+- Migrations: plain numbered SQL files in `packages/api/migrations/` (`0001_*.sql`, …), applied by a tiny runner
+  (`packages/api/src/db/migrate.ts`) that records them in a `schema_migrations` table, one transaction per file.
 - Tests: `vitest`, running against a real PostgreSQL + pgvector database (`TEST_DATABASE_URL`).
   The test setup drops and recreates the `public` and `private` schemas and runs all migrations.
-- Scripts: `npm run build` (tsc), `npm run typecheck`, `npm test`, `npm run migrate`, `npm run dev` (tsx watch),
-  `npm run cli -- <command>`.
+- Scripts (in `packages/api`): `npm run build` (tsc), `npm run typecheck`, `npm test`, `npm run migrate`,
+  `npm run dev` (tsx watch), `npm run cli -- <command>`.
 - Config from env: `DATABASE_URL`, `TEST_DATABASE_URL`, `PORT`, `HOST`, `LOG_LEVEL`, `MAX_BATCH_ITEMS` (default 5000).
 - Error format: `{ "error": { "code": string, "message": string, "details"?: unknown } }`.
   Codes: `validation_failed` (400/422), `unauthorized` (401), `forbidden` (403), `not_found` (404),
@@ -31,9 +32,9 @@ small enough for one agent. Every phase ends with green checks and a commit.
 > **Status: done** (commit `e2d81fc`). Deviation: `GET /me` added so scripts can check a token without a role.
 
 Deliverables:
-- Project skeleton: `package.json`, `tsconfig.json`, `vitest.config.ts`, `src/app.ts` (app factory
-  `buildApp({ pool })`), `src/server.ts`, `src/config.ts`, `.env.example`, `.gitignore`.
-- `migrations/0001_init.sql` with the **complete** schema from README: extensions (`vector`),
+- Project skeleton in `packages/api/`: `package.json`, `tsconfig.json`, `vitest.config.ts`, `src/app.ts` (app factory
+  `buildApp({ pool })`), `src/server.ts`, `src/config.ts`, `.env.example`.
+- `packages/api/migrations/0001_init.sql` with the **complete** schema from README: extensions (`vector`),
   `uuid_generate_v7()`, `private` schema tables, `app_user`, all scholarly and derived tables,
   `audit_event`, CHECK constraints, FKs `ON DELETE RESTRICT`, indexes on every FK and on filter
   columns (language, year_from/year_to, relation, genre, status).
@@ -53,15 +54,15 @@ Deliverables:
   - `audit_event`: UPDATE/DELETE rejected by trigger.
 - `private` functions (`SECURITY DEFINER`, `SET search_path`): `private.resolve_token(token_sha256 text)
   returns table(user_id uuid, role text, kind text)` (ignores revoked/expired tokens and non-active users).
-- `sql/roles.sql` (ops script, not a migration): creates `sermonize_app` role, revokes `private`
+- `packages/api/sql/roles.sql` (ops script, not a migration): creates `sermonize_app` role, revokes `private`
   access, grants EXECUTE on the resolver, INSERT/SELECT on `audit_event` only. Documented in README.
 - Auth plugin: parses `Authorization: Bearer <token>`, hashes with SHA-256, resolves principal.
   `request.principal = { userId, role, kind }` or `null`. Helpers `requireRole('contributor')`.
   v1 has no anonymous access: every route except `GET /health` requires at least `reader`.
 - DB helper `withTransaction(principal, requestId, fn)`: `BEGIN`, `SET LOCAL app.user_id`,
   `SET LOCAL app.request_id`, run, `COMMIT`/`ROLLBACK`.
-- `src/lib/batch-audit.ts`: helper to write one `batch_insert` audit event.
-- CLI (`src/cli.ts`): `migrate`, `create-user --kind human|service --role <role>` (prints user id),
+- `packages/api/src/lib/batch-audit.ts`: helper to write one `batch_insert` audit event.
+- CLI (`packages/api/src/cli.ts`): `migrate`, `create-user --kind human|service --role <role>` (prints user id),
   `create-token --user <id> --name <name>` (prints the token once), `revoke-token <id>`.
   Bootstrap runs with `app.user_id` set to a fixed `system` user created by the migration
   (`00000000-0000-7000-8000-000000000000`, kind `service`, role `admin`).
@@ -78,7 +79,7 @@ Deliverables:
 > **Status: done** (commit `176bc56`). Additions: `POST /works` accepts `persons`/`occasion` and `POST /texts`
 > `persons`, so contributors can attribute what they create (the `PUT` endpoints need curator).
 
-Deliverables (`src/routes/scholarly/*`):
+Deliverables (`packages/api/src/routes/scholarly/*`):
 - persons, works (+ `PUT /works/:id/persons`, `PUT /works/:id/occasion`), sources, texts
   (+ `PUT /texts/:id/persons`), with create, get, list (filters below), PATCH (curator+), withdraw (curator+).
 - List filters: persons `?q=` (name ILIKE); works `?genre=&person_id=&year_from=&year_to=&part_of_work_id=`;
@@ -102,7 +103,7 @@ Deliverables (`src/routes/scholarly/*`):
 > on `GET /chunks/:id`, `hnsw_index` state on spaces, CLI `drop-index`, `date_basis` search filter.
 > `GET /chunks/:id/provenance` moved to Phase 4.
 
-Deliverables (`src/routes/derived/*`):
+Deliverables (`packages/api/src/routes/derived/*`):
 - `POST /segmentations` (contributor+, requires `producer`), `GET /segmentations/:id`, `GET /texts/:id/segmentations`.
 - `POST /segmentations/:id/chunks`: array of `{ id?, sequence, start_offset, end_offset, text, locus?, language?, metadata? }`
   (≤ `MAX_BATCH_ITEMS`). Server validates each chunk text equals `substr(body, start+1, end-start)`
@@ -133,9 +134,9 @@ Deliverables (`src/routes/derived/*`):
 ## Phase 4: Clustering, labels, reviews, provenance, API docs
 
 > **Status: done.** Deviations and decisions:
-> - Migration `0002_clustering_completion` (0001 unchanged): `cluster.size` can be filled once while the run is
->   open, completion is checked in the database (≥ 1 membership, sizes match, NULL sizes filled), and
->   `clustering_run.withdrawn_reason` was added so a withdrawal records why (like other withdrawals).
+> - `cluster.size` can be filled once while the run is open, completion is checked in the database
+>   (≥ 1 membership, sizes match, NULL sizes filled), and `clustering_run.withdrawn_reason` records why a run
+>   was withdrawn (like other withdrawals).
 > - `cluster.size` counts the memberships of the cluster **and its descendants** (flat clusterings: direct members);
 >   `member_count` in responses is the direct count and `GET /clusters/:id/members` lists direct members.
 > - Readers see `complete` runs only; open/withdrawn runs and everything under them need contributor+.

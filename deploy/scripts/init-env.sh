@@ -1,12 +1,12 @@
 #!/bin/sh
 # Creates deploy/.env from deploy/.env.example for one of the two setups, with fresh random secrets.
 #
-#   sh scripts/init-env.sh host-nginx <domain>     Setup A: host nginx, bundled PostgreSQL (managed role)
+#   sh scripts/init-env.sh host-nginx <domain>     Setup A: host nginx, bundled PostgreSQL
 #   sh scripts/init-env.sh traefik    <domain>     Setup B: riksunsrk Traefik, shared PostgreSQL
 #
 # Optional environment:
 #   DB=bundled|external      host-nginx only: external = no bundled db; fill in DATABASE_OWNER_URL yourself
-#   ROLE_MODE=managed|external|owner   SERMONIZE_APP_ROLE_MODE (defaults: bundled managed, external external)
+#   ROLE_MODE=app|owner                SERMONIZE_APP_ROLE_MODE (default app: the API connects as sermonize_app)
 #   DB_OWNER_URL=postgres://...        the schema owner's URL (e.g. from infra's add-app.sh)
 #   DB_HOST=pg.shared.local DB_NAME=sermonize_db DB_OWNER=sermonize_user   used when DB_OWNER_URL is unset
 #   TRAEFIK_TRUSTED_CIDR=...           traefik only; detected from the Traefik network when Docker can see it
@@ -55,13 +55,11 @@ case $DB in
   bundled)
     COMPOSE_PROFILES=bundled-db
     POSTGRES_PASSWORD=$(hex)
-    ROLE_MODE=${ROLE_MODE:-managed}
     OWNER_URL=postgres://sermonize:$POSTGRES_PASSWORD@sermonize-db:5432/sermonize
     DB_HOSTPORT=sermonize-db:5432 DB_NAME=sermonize
     ;;
   external)
     COMPOSE_PROFILES=
-    ROLE_MODE=${ROLE_MODE:-external}
     : "${DB_HOST:=host.docker.internal}" "${DB_NAME:=sermonize}" "${DB_OWNER:=sermonize}"
     OWNER_URL=${DB_OWNER_URL:-postgres://$DB_OWNER:CHANGE_ME@$DB_HOST:5432/$DB_NAME}
     # host:port/dbname of the owner URL, for the app URL.
@@ -74,17 +72,25 @@ case $DB in
   *) echo "DB must be bundled or external" >&2; exit 2 ;;
 esac
 
+ROLE_MODE=${ROLE_MODE:-app}
 case $ROLE_MODE in
-  managed | external) APP_URL=postgres://sermonize_app:$APP_PW@$DB_HOSTPORT/$DB_NAME ;;
+  app) APP_URL=postgres://sermonize_app:$APP_PW@$DB_HOSTPORT/$DB_NAME ;;
   owner) APP_URL=$OWNER_URL ;;
-  *) echo "ROLE_MODE must be managed, external or owner" >&2; exit 2 ;;
+  *) echo "ROLE_MODE must be app or owner" >&2; exit 2 ;;
 esac
-if [ "$ROLE_MODE" = external ]; then
+if [ "$ROLE_MODE" = app ] && [ "$DB" = external ]; then
+  # The bundled db's owner is a superuser; an external owner usually is not. migrate creates sermonize_app
+  # itself when the owner may create roles, otherwise it stops and prints the SQL below.
+  OWNER_NAME=$(printf '%s' "$OWNER_URL" | sed -n 's|^postgres[a-z]*://\([^:@]*\).*|\1|p')
   NOTES="$NOTES
-- A database administrator creates the API's role once (the password is in DATABASE_APP_URL):
-    CREATE ROLE sermonize_app LOGIN PASSWORD '$APP_PW';
-    GRANT CONNECT ON DATABASE $DB_NAME TO sermonize_app;
-  (docs/deployment.md, \"Database roles\")."
+- The API connects as sermonize_app. Unless the schema owner ($OWNER_NAME) is a superuser or has CREATEROLE,
+  a database administrator does ONE of these once (docs/deployment.md, \"Database roles\"):
+  a) let the owner create roles (PostgreSQL >= 16: it can then manage only the roles it creates); migrate then
+     creates sermonize_app and keeps its password in sync with DATABASE_APP_URL:
+       ALTER ROLE \"$OWNER_NAME\" CREATEROLE;
+  b) create the role (migrate then applies the grants and never changes the role or its password):
+       CREATE ROLE sermonize_app LOGIN PASSWORD '$APP_PW';
+       GRANT CONNECT ON DATABASE \"$DB_NAME\" TO sermonize_app;"
 fi
 
 TRUSTED_CIDR=
