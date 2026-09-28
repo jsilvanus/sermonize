@@ -12,7 +12,6 @@
 .github
 docs
 deploy/.env
-deploy/certbot
 deploy/backups
 *.md
 **/*.md

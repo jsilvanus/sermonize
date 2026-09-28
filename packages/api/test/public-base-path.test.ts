@@ -72,6 +72,14 @@ describe('OpenAPI behind a path prefix', () => {
     expect((await app.inject({ method: 'GET', url: '/api/health' })).statusCode).not.toBe(200); // no /api routes
   });
 
+  it('prefixes root-relative redirects with the base path (proxies strip it on the way in)', async () => {
+    const withPrefix = await prefixed.app.inject({ method: 'GET', url: '/docs/static/index.html' });
+    expect(withPrefix.statusCode).toBe(302);
+    expect(withPrefix.headers.location).toBe('/api/docs/');
+    const withoutPrefix = await root.app.inject({ method: 'GET', url: '/docs/static/index.html' });
+    expect(withoutPrefix.headers.location).toBe('/docs/');
+  });
+
   it('refuses an invalid base path at startup', async () => {
     const pool = createTestPool();
     try {

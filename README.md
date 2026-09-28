@@ -9,8 +9,10 @@ The first version is intentionally **data-only**: the API stores and retrieves s
 The data model was revised after a critical review: see [`docs/data-model-review.md`](docs/data-model-review.md) for the reasoning and [`docs/implementation-plan.md`](docs/implementation-plan.md) for the build plan.
 [`docs/api-examples.md`](docs/api-examples.md) walks through the whole API with curl; the running server
 publishes its OpenAPI document at `/docs` (Swagger UI) and `/docs/json`.
-[`docs/deployment.md`](docs/deployment.md) describes the production deployment (Docker Compose, nginx, one domain:
-web UI at `/`, API at `/api/`, MCP at `/mcp`).
+[`docs/deployment.md`](docs/deployment.md) describes the production deployment (Docker Compose, one domain:
+web UI at `/`, API at `/api/`, MCP at `/mcp`) in two setups: behind nginx installed on the host, or behind
+the shared Traefik and PostgreSQL of the riksunsrk infrastructure. Prebuilt images are published to
+`ghcr.io/jsilvanus/sermonize-{api,mcp,web,tools}` for `v*` tags.
 
 ## Repository layout
 
@@ -20,7 +22,7 @@ This is an npm-workspaces monorepo (ESM everywhere, one root `package-lock.json`
 sermonize/
 ├── package.json            workspaces + root scripts
 ├── Dockerfile              production images (targets api, mcp, web, tools)
-├── deploy/                 docker-compose.yml, nginx, .env.example, ops scripts (docs/deployment.md)
+├── deploy/                 compose.yml + host-nginx/ and traefik/ setups, .env.example, ops scripts (docs/deployment.md)
 ├── docs/                   design notes, data-model review, API walkthrough, deployment guide
 └── packages/
     ├── api/                @sermonize/api: the REST API (this README)

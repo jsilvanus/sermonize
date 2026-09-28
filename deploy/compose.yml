@@ -1,0 +1,221 @@
+# Sermonize production stack: base file. See docs/deployment.md.
+#
+# Always used together with one of the two proxy setups (deploy/.env sets COMPOSE_FILE, so a plain
+# `docker compose ...` in deploy/ picks the right combination):
+#
+#   Setup A, host-installed nginx:  compose.yml + host-nginx/compose.host-nginx.yml
+#   Setup B, Traefik (riksunsrk):    compose.yml + traefik/compose.traefik.yml
+#
+# Services: migrate (one-off, every `up`), api, mcp, web; `tools` (profile "tools", operations shell);
+# `db` (profile "bundled-db", PostgreSQL + pgvector in a volume). Without the bundled-db profile the
+# database is external (DATABASE_OWNER_URL / DATABASE_APP_URL in deploy/.env).
+#
+# Images are built locally from the repository root's Dockerfile, or pulled when
+# SERMONIZE_IMAGE_PREFIX names a registry (e.g. ghcr.io/jsilvanus/sermonize -> ghcr.io/jsilvanus/sermonize-api).
+#
+# Networks: `backend` is internal (no Internet, no published ports) and carries all service-to-service
+# traffic under unique aliases (sermonize-api, sermonize-db), so joining shared networks (Traefik's, the
+# shared Postgres one) cannot make `api`/`db` resolve to another stack's container. mcp also has `egress`
+# (it fetches OAuth client metadata documents over HTTPS). The setup overrides add the networks the
+# proxy reaches the services on.
+
+name: sermonize
+
+x-node-service: &node-service
+  restart: unless-stopped
+  init: true
+  read_only: true
+  tmpfs:
+    - /tmp
+  security_opt:
+    - no-new-privileges:true
+  cap_drop:
+    - ALL
+  logging: &logging
+    driver: json-file
+    options:
+      max-size: 10m
+      max-file: "5"
+
+x-build: &build
+  context: ..
+  dockerfile: Dockerfile
+
+# migrate and api wait for the bundled database when it is part of the stack.
+x-db-depends: &db-depends
+  db:
+    condition: service_healthy
+    # Only when the bundled-db profile is active; an external database is not a compose service.
+    required: false
+
+services:
+  # Bundled PostgreSQL (profile "bundled-db"). Not published; reachable as sermonize-db:5432 on backend.
+  db:
+    image: pgvector/pgvector:0.8.1-pg16
+    profiles: ["bundled-db"]
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: sermonize
+      POSTGRES_DB: sermonize
+      # Required with the bundled-db profile (the image refuses to initialise without it).
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-}
+      POSTGRES_INITDB_ARGS: --auth-host=scram-sha-256
+    volumes:
+      - db_data:/var/lib/postgresql/data
+    shm_size: 256mb # HNSW index builds (create-index) use parallel workers
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U sermonize -d sermonize"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 10s
+    networks:
+      backend:
+        aliases: [sermonize-db]
+    logging: *logging
+
+  # One-off, on every `up`: pgvector check, migrations as the schema owner, then the app role according to
+  # SERMONIZE_APP_ROLE_MODE (managed | external | owner; see deploy/scripts/migrate.sh). Idempotent.
+  migrate:
+    build:
+      <<: *build
+      target: tools
+    image: ${SERMONIZE_IMAGE_PREFIX:-sermonize}-tools:${SERMONIZE_TAG:-latest}
+    command: ["sermonize-migrate"]
+    restart: "no"
+    environment:
+      DATABASE_OWNER_URL: ${DATABASE_OWNER_URL:?set DATABASE_OWNER_URL in deploy/.env}
+      DATABASE_APP_URL: ${DATABASE_APP_URL:?set DATABASE_APP_URL in deploy/.env}
+      SERMONIZE_APP_ROLE_MODE: ${SERMONIZE_APP_ROLE_MODE:-managed}
+    depends_on: *db-depends
+    networks:
+      - backend
+    read_only: true
+    tmpfs:
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    logging: *logging
+
+  api:
+    <<: *node-service
+    build:
+      <<: *build
+      target: api
+    image: ${SERMONIZE_IMAGE_PREFIX:-sermonize}-api:${SERMONIZE_TAG:-latest}
+    environment:
+      PORT: "3000"
+      HOST: 0.0.0.0
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      # sermonize_app (least privilege) unless SERMONIZE_APP_ROLE_MODE=owner.
+      DATABASE_URL: ${DATABASE_APP_URL:?set DATABASE_APP_URL in deploy/.env}
+      # The proxy forwards /api/* here with the prefix stripped; OpenAPI servers, Swagger UI assets and
+      # redirects use it.
+      PUBLIC_BASE_PATH: /api
+      # web and mcp forward the end user's IP from backend; the setup override adds the proxy.
+      TRUST_PROXY: ${SERMONIZE_BACKEND_SUBNET:-172.28.0.0/24}
+      MAX_BATCH_ITEMS: ${MAX_BATCH_ITEMS:-5000}
+      REGISTRATION_OPEN: ${REGISTRATION_OPEN:-false}
+      REGISTRATION_DEFAULT_ROLE: ${REGISTRATION_DEFAULT_ROLE:-reader}
+      LOGIN_TOKEN_TTL_HOURS: ${LOGIN_TOKEN_TTL_HOURS:-12}
+      MCP_LOGIN_TOKEN_TTL_HOURS: ${MCP_LOGIN_TOKEN_TTL_HOURS:-720}
+      CLI_LOGIN_TOKEN_TTL_HOURS: ${CLI_LOGIN_TOKEN_TTL_HOURS:-12}
+      AUTH_RATE_LIMIT_MAX: ${AUTH_RATE_LIMIT_MAX:-10}
+      AUTH_RATE_LIMIT_WINDOW_SECONDS: ${AUTH_RATE_LIMIT_WINDOW_SECONDS:-60}
+    depends_on:
+      <<: *db-depends
+      migrate:
+        condition: service_completed_successfully
+    networks:
+      backend:
+        aliases: [sermonize-api]
+
+  mcp:
+    <<: *node-service
+    build:
+      <<: *build
+      target: mcp
+    image: ${SERMONIZE_IMAGE_PREFIX:-sermonize}-mcp:${SERMONIZE_TAG:-latest}
+    environment:
+      PORT: "5999"
+      HOST: 0.0.0.0
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      MCP_PUBLIC_URL: https://${DOMAIN:?set DOMAIN in deploy/.env}
+      # Set by the setup override (the proxy's address).
+      TRUST_PROXY: "false"
+      JWT_SECRET: ${MCP_JWT_SECRET:?set MCP_JWT_SECRET in deploy/.env}
+      SERMONIZE_TOKEN_KEY: ${MCP_TOKEN_KEY:?set MCP_TOKEN_KEY in deploy/.env}
+      STORAGE_PATH: /data/app.sqlite
+      SERMONIZE_API_URL: http://sermonize-api:3000
+      SERMONIZE_REQUEST_TIMEOUT_MS: ${MCP_REQUEST_TIMEOUT_MS:-15000}
+    volumes:
+      - mcp_data:/data
+    depends_on:
+      api:
+        condition: service_healthy
+    networks:
+      - backend
+      - egress
+
+  web:
+    <<: *node-service
+    build:
+      <<: *build
+      target: web
+    image: ${SERMONIZE_IMAGE_PREFIX:-sermonize}-web:${SERMONIZE_TAG:-latest}
+    environment:
+      PORT: "3100"
+      HOST: 0.0.0.0
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      SERMONIZE_API_URL: http://sermonize-api:3000
+      # Set by the setup override (the proxy's address).
+      TRUST_PROXY: "false"
+      WEB_COOKIE_SECRET: ${WEB_COOKIE_SECRET:?set WEB_COOKIE_SECRET in deploy/.env}
+      WEB_COOKIE_SECURE: "true"
+      SERMONIZE_REQUEST_TIMEOUT_MS: ${WEB_REQUEST_TIMEOUT_MS:-10000}
+    depends_on:
+      api:
+        condition: service_healthy
+    networks:
+      - backend
+
+  # Operations shell (profile "tools"): the API's database CLI as the schema owner, sermonize-admin
+  # against the API on the internal network, psql/pg_dump (PostgreSQL 17 client). E.g.
+  #   docker compose run --rm tools sermonize-db create-index <embedding-space-id>
+  #   docker compose run --rm tools sh -c 'sermonize-admin login --email you@example.org && sermonize-admin users list'
+  tools:
+    build:
+      <<: *build
+      target: tools
+    image: ${SERMONIZE_IMAGE_PREFIX:-sermonize}-tools:${SERMONIZE_TAG:-latest}
+    profiles: ["tools"]
+    environment:
+      DATABASE_URL: ${DATABASE_OWNER_URL:?set DATABASE_OWNER_URL in deploy/.env}
+      SERMONIZE_API_URL: http://sermonize-api:3000
+    networks:
+      - backend
+    read_only: true
+    tmpfs:
+      - /tmp
+      - /home/node:uid=1000,gid=1000,mode=0700
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+
+networks:
+  # Internal: no route to the Internet, no published ports. Fixed subnet so the API's TRUST_PROXY can
+  # name it (web and mcp forward the client address from here).
+  backend:
+    internal: true
+    ipam:
+      config:
+        - subnet: ${SERMONIZE_BACKEND_SUBNET:-172.28.0.0/24}
+  # Outbound HTTPS for mcp (OAuth client metadata documents).
+  egress: {}
+
+volumes:
+  db_data:
+  mcp_data:

@@ -5,7 +5,7 @@
 #   docker build --target web   -t sermonize-web   .
 #   docker build --target tools -t sermonize-tools .   # migrations, DB CLI, sermonize-admin, psql
 #
-# deploy/docker-compose.yml builds all four. See docs/deployment.md.
+# deploy/compose.yml builds all four (or pulls them: SERMONIZE_IMAGE_PREFIX). See docs/deployment.md.
 
 # Base image (override to pin a digest, e.g. --build-arg NODE_IMAGE=node:22-bookworm-slim@sha256:...).
 # Debian (glibc) rather than Alpine: the lockfile's native @node-rs/argon2 binary is the gnu one.
@@ -108,14 +108,22 @@ CMD ["node", "packages/web/dist/server.js"]
 
 # ---------------------------------------------------------------------------------------------
 # Operations image: the API's database CLI (migrations, first admin, tokens, vector indexes),
-# sermonize-admin (user management over HTTP), psql (roles.sql) and the deploy scripts.
+# sermonize-admin (user management over HTTP), psql/pg_dump (PostgreSQL 17 client) and the migrate script.
 #   sermonize-db <command>      = node packages/api/dist/cli.js <command>   (needs DATABASE_URL)
 #   sermonize-admin <command>   = node packages/cli/dist/index.js <command> (needs SERMONIZE_API_URL)
-#   sermonize-migrate           = migrations + roles.sql + sermonize_app password (deploy/scripts/migrate.sh)
+#   sermonize-migrate           = pgvector check, migrations, app role per SERMONIZE_APP_ROLE_MODE (deploy/scripts/migrate.sh)
 FROM api AS tools
 USER root
+# PostgreSQL client from the PGDG repository (key shipped by Debian's postgresql-common): pg_dump must be
+# at least as new as the server (bundled pg16, or a shared server that may be newer than Debian's 15).
+ARG PG_CLIENT_MAJOR=17
 RUN apt-get update \
- && apt-get install -y --no-install-recommends postgresql-client ca-certificates \
+ && apt-get install -y --no-install-recommends ca-certificates postgresql-common \
+ && . /etc/os-release \
+ && echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] https://apt.postgresql.org/pub/repos/apt ${VERSION_CODENAME}-pgdg main" \
+      > /etc/apt/sources.list.d/pgdg.list \
+ && apt-get update \
+ && apt-get install -y --no-install-recommends "postgresql-client-${PG_CLIENT_MAJOR}" \
  && rm -rf /var/lib/apt/lists/*
 COPY packages/cli/package.json packages/cli/
 COPY --from=build /app/packages/cli/dist/ packages/cli/dist/
