@@ -1,5 +1,5 @@
 /**
- * Self-service password accounts (migration 0003, src/routes/auth.ts):
+ * Self-service password accounts (private.register_user etc., src/routes/auth.ts):
  * registration, login, logout, token expiry, rate limiting and PII hygiene.
  */
 import { randomUUID } from 'node:crypto';

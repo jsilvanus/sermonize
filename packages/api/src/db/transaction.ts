@@ -8,7 +8,7 @@ import type { Principal } from '../lib/principal.js';
  */
 export async function withTransaction<T>(
   pool: Pool,
-  /** null only for the self-service auth functions, which set their own actor (see migration 0003). */
+  /** null only for the self-service auth functions, which set their own actor (see migrations/0001_init.sql). */
   principal: Pick<Principal, 'userId'> | null,
   requestId: string,
   fn: (client: PoolClient) => Promise<T>,

@@ -1,5 +1,5 @@
 /**
- * Account administration (migration 0005, src/routes/admin.ts): listing with PII,
+ * Account administration (private.admin_* functions, src/routes/admin.ts): listing with PII,
  * PATCH with its guards, admin-set passwords and token listings.
  */
 import { randomUUID } from 'node:crypto';

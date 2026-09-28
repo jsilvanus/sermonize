@@ -11,7 +11,7 @@ export interface Principal {
   kind: UserKind;
 }
 
-/** Fixed service/admin user created by migration 0001, used by the CLI and bootstrap. */
+/** Fixed service/admin user created by the initial migration, used by the CLI and bootstrap. */
 export const SYSTEM_USER_ID = '00000000-0000-7000-8000-000000000000';
 export const SYSTEM_PRINCIPAL: Principal = { userId: SYSTEM_USER_ID, role: 'admin', kind: 'service' };
 
