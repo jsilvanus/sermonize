@@ -224,6 +224,18 @@ export class SermonizeClient {
     });
   }
 
+  /**
+   * `POST /auth/oidc` with `client: 'mcp'` (only when the API has OIDC_ISSUER set): the API verifies the
+   * ID token from the IdP itself, maps it to a Sermonize account and returns a new API token like
+   * `login()`. `accessToken` (the IdP's) lets the API read the IdP's userinfo when the ID token has no email.
+   */
+  oidcLogin(tokens: { idToken: string; accessToken?: string | undefined }, clientIp?: string): Promise<LoginResult> {
+    return this.send<LoginResult>('POST', '/auth/oidc', {
+      body: { id_token: tokens.idToken, ...(tokens.accessToken ? { access_token: tokens.accessToken } : {}), client: 'mcp' },
+      ...(clientIp ? { clientIp } : {}),
+    });
+  }
+
   /** `POST /auth/logout`: revokes this API token. */
   async logout(apiToken: string): Promise<void> {
     await this.send<null>('POST', '/auth/logout', { token: apiToken });

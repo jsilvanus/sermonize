@@ -121,11 +121,21 @@ describe('SQLite schema', () => {
     const db = new DatabaseSync(':memory:');
     initSchema(db);
     const tables = db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name").all().map((r) => (r as { name: string }).name);
-    expect(tables).toEqual(['authorization_codes', 'grants', 'refresh_tokens']);
+    expect(tables).toEqual(['authorization_codes', 'grants', 'oidc_states', 'refresh_tokens']);
     expect(db.prepare('PRAGMA user_version').get()).toEqual({ user_version: SCHEMA_VERSION });
     initSchema(db); // idempotent
     db.exec('PRAGMA user_version = 99');
     expect(() => initSchema(db)).toThrow(/schema version 99/);
+    db.close();
+  });
+
+  it('upgrades a version 1 file (before single sign-on) by adding oidc_states', () => {
+    const db = new DatabaseSync(':memory:');
+    initSchema(db);
+    db.exec('DROP TABLE oidc_states; PRAGMA user_version = 1');
+    initSchema(db);
+    expect(db.prepare('PRAGMA user_version').get()).toEqual({ user_version: 2 });
+    expect(db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'oidc_states'").get()).toEqual({ name: 'oidc_states' });
     db.close();
   });
 });

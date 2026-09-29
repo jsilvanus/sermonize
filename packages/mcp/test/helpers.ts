@@ -57,7 +57,12 @@ const FORM_HEADERS = { 'content-type': 'application/x-www-form-urlencoded' };
 /** Starts the MCP HTTP server on an ephemeral port, relaying to `sermonizeApiUrl`. */
 export async function startMcpServer(
   sermonizeApiUrl: string,
-  opts: { trustProxy?: boolean | string; publicUrl?: string } = {},
+  opts: {
+    trustProxy?: boolean | string;
+    publicUrl?: string;
+    oidc?: AppConfig['oidc'];
+    oidcRateLimit?: { max: number; timeWindow: number } | null;
+  } = {},
 ): Promise<McpTestServer> {
   const dir = mkdtempSync(join(tmpdir(), 'sermonize-mcp-test-'));
   const publicUrl = opts.publicUrl ?? PUBLIC_URL;
@@ -69,9 +74,11 @@ export async function startMcpServer(
     tokenKey: randomBytes(32),
     requestTimeoutMs: 5_000,
     trustProxy: opts.trustProxy ?? false,
+    oidc: opts.oidc ?? null,
   };
   const app = await buildMcpApp(config, {
     sweepIntervalMs: 0,
+    ...(opts.oidcRateLimit !== undefined ? { oidcRateLimit: opts.oidcRateLimit } : {}),
     resolveClient: async (clientId) => {
       if (clientId !== CLIENT_ID) throw new Error('unknown client');
       return { client_id: CLIENT_ID, client_name: 'Test Client', redirect_uris: [REDIRECT_URI] };
