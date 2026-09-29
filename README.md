@@ -82,13 +82,33 @@ stores or hashes passwords, both call the API's `POST /auth/login`.
  scripts ------------------ Authorization: Bearer <token> ------------+
 ```
 
+**Single sign-on (optional).** With `OIDC_ISSUER` set (API and MCP server), the MCP sign-in page also offers
+a button for an OIDC provider such as authentik. The MCP server is the OIDC Relying Party: it runs the code
+flow and passes the ID token to the API's `POST /auth/oidc` (`client: "mcp"`). The API verifies the ID token
+itself (signature against the issuer's JWKS, `iss` = `OIDC_ISSUER`, `aud` contains one of `OIDC_CLIENT_IDS`,
+`exp`, `iat` at most 10 minutes old) and maps the identity `(issuer, sub)` to an account through
+`private.auth_identity`:
+
+1. an identity already linked to an account → that account;
+2. else an existing **human** account whose email equals the token's email (case-insensitive), if
+   `email_verified` is `true` or `OIDC_TRUST_EMAIL=true` → linked and used;
+3. else, with `OIDC_CREATE_USERS=true`, a new active human account with `REGISTRATION_DEFAULT_ROLE` (name from
+   `name` / `preferred_username` / email; the email only if trusted as in 2; no password) → linked and used;
+4. else 403 `no_account` (*"No account for this sign-in; ask the administrator."*).
+
+Disabled accounts are refused (401 `invalid_credentials`, and nothing is linked). The token issued is the same
+kind as a password login's (named after the client, same lifetimes); the audit trail gets `identity_link`
+(`{ issuer, via: email | created }`, never the subject or email) and `token_create` with `via: "oidc"`.
+The web UI and `sermonize-admin` have no SSO button yet; the endpoint accepts `client: "web" | "cli"` too.
+Setup: [`docs/deployment.md`](docs/deployment.md#single-sign-on-oidc).
+
 API token kinds (all are rows of `private.api_token`, stored as SHA-256 hashes, revocable, sent as
 `Authorization: Bearer sz_...`):
 
 | token | name | created by | lifetime |
 |---|---|---|---|
 | web session | `web` | `POST /auth/login` (default `client: "web"`), via the web sign-in form | `LOGIN_TOKEN_TTL_HOURS` (12 h); revoked at sign-out |
-| MCP grant | `mcp` | `POST /auth/login` with `client: "mcp"`, via the MCP OAuth sign-in page | `MCP_LOGIN_TOKEN_TTL_HOURS` (720 h = 30 days); revoked when the OAuth grant ends |
+| MCP grant | `mcp` | `POST /auth/login` (or `POST /auth/oidc`) with `client: "mcp"`, via the MCP OAuth sign-in page | `MCP_LOGIN_TOKEN_TTL_HOURS` (720 h = 30 days); revoked when the OAuth grant ends |
 | admin CLI | `cli` | `sermonize-admin login` (`POST /auth/login` with `client: "cli"`) | `CLI_LOGIN_TOKEN_TTL_HOURS` (12 h); revoked by `sermonize-admin logout` |
 | script / service | chosen by the admin | `sermonize-admin tokens create`, `npm run cli -- create-token` or `POST /admin/users/:id/tokens` | chosen by the admin (may be unlimited) |
 
@@ -320,7 +340,7 @@ A label's current status is derived from its latest review (none = `proposed`). 
 
 ```
 schema private  (no privileges for the application role)
-  auth_identity(user_id, issuer, subject)
+  auth_identity(user_id, issuer, subject, last_login_at)   OIDC identities (POST /auth/oidc)
   api_token(id, user_id, token_sha256, name, expires_at, revoked_at)
   user_pii(user_id, email, display_name, …)       email unique case-insensitively
   password_credential(user_id, password_hash, …)  argon2id, hashed in Node
@@ -337,7 +357,7 @@ schema public
 - `kind = service` principals are used by external processing scripts.
 - The server resolves the principal from the `Authorization: Bearer <token>` header via
   `SECURITY DEFINER` functions in `private`. v1 uses API tokens (stored as SHA-256 only).
-  OIDC can map `(issuer, subject)` through `auth_identity` later.
+  OIDC sign-in (`POST /auth/oidc`, migration `0002_oidc.sql`) maps `(issuer, subject)` through `auth_identity`.
 - Every write runs in one transaction that sets `SET LOCAL app.user_id` and `app.request_id`.
   Database triggers fill `created_by`/`updated_by` and write audit events, so no code path can forget.
   A user id supplied in a request body is ignored.
@@ -361,7 +381,7 @@ Access level covers derived data too: chunks and embeddings of restricted texts 
 
 **audit_event**
 - id, occurred_at, actor_id, action (`insert | update | delete | withdraw | batch_insert | status_change |
-  token_create | token_revoke | pii_update | password_set | pii_read`; `delete` only for the replaceable join tables;
+  token_create | token_revoke | pii_update | password_set | pii_read | identity_link`; `delete` only for the replaceable join tables;
   `pii_read` records that an admin listed accounts with their PII: the number of rows and the filter
   names, never the search text or the values),
   entity_type, entity_id NULL, batch_count NULL, request_id, changes jsonb
@@ -542,8 +562,17 @@ Password accounts and statistics (used by `@sermonize/web`):
   is a 400. Every failure (unknown email, wrong password,
   disabled user, user without a password) is the same 401 `invalid_credentials`; unknown emails still run an
   argon2 verification against a dummy hash, and the status is checked only after verification.
+- `POST /auth/oidc` (public; only when `OIDC_ISSUER` is set, otherwise the route does not exist)
+  `{ id_token, access_token?, client? }` → `{ token, expires_at, user_id, role }`, the same token as
+  `POST /auth/login` for that `client`. The API verifies `id_token` itself (JWKS from the issuer's discovery
+  document, fetched on first use and retried after a failure; `iss`, `aud` ∋ one of `OIDC_CLIENT_IDS`, `azp` if
+  present, `exp`, `iat` ≤ 10 minutes old; asymmetric algorithms only). `access_token` (the IdP's) is only used
+  to read the IdP's userinfo when the ID token has no email; its `sub` must match. Account mapping: see
+  [Accounts and sign-in](#accounts-and-sign-in-one-account-everywhere). Errors: 401 `invalid_id_token`,
+  403 `no_account`, 401 `invalid_credentials` (disabled account), 503 `oidc_unavailable` (IdP unreachable),
+  429 `rate_limited` (same limit as login).
 - `POST /auth/logout` (any authenticated caller) revokes the token used for the request → 204.
-- Register and login are rate-limited per client IP (`AUTH_RATE_LIMIT_MAX` requests per
+- Register, login and OIDC sign-in are rate-limited per client IP (`AUTH_RATE_LIMIT_MAX` requests per
   `AUTH_RATE_LIMIT_WINDOW_SECONDS`, default 10 per 60 s, in memory, per process; `0` disables) → 429 `rate_limited`.
   Behind a proxy (`@sermonize/web` and `@sermonize/mcp` forward the end user's IP as `X-Forwarded-For`; nginx),
   set `TRUST_PROXY` to the addresses of all of them, otherwise all their users share one bucket.
@@ -558,7 +587,7 @@ Password accounts and statistics (used by `@sermonize/web`):
   (chunk, embedding) may later need estimates (`pg_class.reltuples`) or a cache.
 
 Other:
-- `GET /health`, `GET /stats`, `GET /auth/config`, `POST /auth/register`, `POST /auth/login` and the API
+- `GET /health`, `GET /stats`, `GET /auth/config`, `POST /auth/register`, `POST /auth/login`, `POST /auth/oidc` and the API
   documentation `GET /docs` (Swagger UI), `GET /docs/json` (OpenAPI 3) are the only
   unauthenticated routes; the document declares bearer-token security for everything else. `GET /me` (the caller's own user id, role and kind;
   added in Phase 1 so that scripts can check a token without needing any particular role)
@@ -596,14 +625,17 @@ curl -H "Authorization: Bearer <token>" http://127.0.0.1:3000/me
 ```
 
 The CLI writes as the fixed system user `00000000-0000-7000-8000-000000000000` (service, admin),
-which migration `0001_init` creates for bootstrapping.
+which migration `0001_init` creates for bootstrapping. Migration `0002_oidc` adds OIDC sign-in
+(`auth_identity.last_login_at` and two SECURITY DEFINER functions); run `sql/roles.sql` again after it.
 
 Environment: `DATABASE_URL`, `TEST_DATABASE_URL`, `PORT` (3000), `HOST` (127.0.0.1),
 `LOG_LEVEL` (info), `MAX_BATCH_ITEMS` (5000), `TRUST_PROXY` (false; `true` or comma-separated proxy addresses/CIDRs),
 `PUBLIC_BASE_PATH` (unset; e.g. `/api` when a reverse proxy publishes the API under that prefix with the prefix
 stripped: sets the OpenAPI `servers` entry and the Swagger UI asset URLs, routes stay at the root),
 `REGISTRATION_OPEN` (false), `REGISTRATION_DEFAULT_ROLE` (reader; only `reader`/`contributor`),
-`LOGIN_TOKEN_TTL_HOURS` (12, web sign-in), `MCP_LOGIN_TOKEN_TTL_HOURS` (720, MCP sign-in), `CLI_LOGIN_TOKEN_TTL_HOURS` (12, `sermonize-admin login`), `AUTH_RATE_LIMIT_MAX` (10; 0 disables), `AUTH_RATE_LIMIT_WINDOW_SECONDS` (60).
+`LOGIN_TOKEN_TTL_HOURS` (12, web sign-in), `MCP_LOGIN_TOKEN_TTL_HOURS` (720, MCP sign-in), `CLI_LOGIN_TOKEN_TTL_HOURS` (12, `sermonize-admin login`), `AUTH_RATE_LIMIT_MAX` (10; 0 disables), `AUTH_RATE_LIMIT_WINDOW_SECONDS` (60),
+`OIDC_ISSUER` (unset = `POST /auth/oidc` off; https required with `NODE_ENV=production`), `OIDC_CLIENT_IDS` (required with
+`OIDC_ISSUER`; comma-separated), `OIDC_CREATE_USERS` (false), `OIDC_TRUST_EMAIL` (false).
 Invalid values stop the server at startup.
 
 Scripts of `packages/api` (run them there, with `-w @sermonize/api` from the root, or via the root scripts above):

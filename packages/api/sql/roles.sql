@@ -53,6 +53,9 @@ GRANT EXECUTE ON FUNCTION
   private.get_password_credential(text),
   private.create_login_token(uuid, text, timestamptz, text),
   private.revoke_own_token(text),
+  -- OIDC sign-in (POST /auth/oidc; the API verifies the ID token first)
+  private.oidc_resolve_user(text, text, text, text, boolean, text),
+  private.create_oidc_login_token(text, text, text, timestamptz, text),
   -- admin user listing, PII updates, passwords (admin principal required)
   private.admin_list_users(uuid, text, text, text, text, timestamptz, uuid, integer),
   private.admin_list_tokens(uuid),

@@ -16,8 +16,22 @@ export interface AuthConfig {
   mcpLoginTokenTtlHours: number;
   /** Lifetime of tokens issued by POST /auth/login for `sermonize-admin login` (`client: 'cli'`), in hours. */
   cliLoginTokenTtlHours: number;
-  /** Per-IP limit on POST /auth/register and /auth/login; null disables it. */
+  /** Per-IP limit on POST /auth/register, /auth/login and /auth/oidc; null disables it. */
   rateLimit: { max: number; timeWindowMs: number } | null;
+  /** OIDC sign-in (POST /auth/oidc); null (OIDC_ISSUER unset) = the route does not exist. */
+  oidc: OidcConfig | null;
+}
+
+/** OIDC sign-in settings (see src/lib/oidc.ts and POST /auth/oidc). */
+export interface OidcConfig {
+  /** OIDC_ISSUER, exactly as the IdP publishes it (the ID token's `iss` must equal it). */
+  issuer: string;
+  /** OIDC_CLIENT_IDS: the ID token's `aud` must contain one of them (the clients that sign users in, e.g. the MCP server). */
+  clientIds: string[];
+  /** OIDC_CREATE_USERS: create an account (REGISTRATION_DEFAULT_ROLE) for an identity that matches none. */
+  createUsers: boolean;
+  /** OIDC_TRUST_EMAIL: link by email even when `email_verified` is not true. */
+  trustEmail: boolean;
 }
 
 export interface Config {
@@ -79,9 +93,41 @@ export function parsePublicBasePath(raw: string | undefined): string {
   return raw.replace(/\/+$/, '');
 }
 
+/**
+ * OIDC_ISSUER must be an absolute http(s) URL without query, fragment or credentials; `https:` is
+ * required when `production` (NODE_ENV=production). Returned unchanged (a trailing slash is significant).
+ */
+export function parseOidcIssuer(raw: string, production: boolean): string {
+  let url: URL;
+  try {
+    url = new URL(raw);
+  } catch {
+    throw new Error(`OIDC_ISSUER must be an absolute URL, got "${raw}"`);
+  }
+  if (url.protocol !== 'https:' && url.protocol !== 'http:') throw new Error(`OIDC_ISSUER must be an http(s) URL, got "${raw}"`);
+  if (url.search || url.hash || url.username || url.password) {
+    throw new Error(`OIDC_ISSUER must not contain a query, fragment or credentials, got "${raw}"`);
+  }
+  if (production && url.protocol !== 'https:') throw new Error('OIDC_ISSUER must be an https URL in production');
+  return raw;
+}
+
+/** OIDC settings from the environment; null when OIDC_ISSUER is unset or empty (OIDC off). */
+export function loadOidcConfig(env: NodeJS.ProcessEnv = process.env): OidcConfig | null {
+  const createUsers = boolFromEnv(env, 'OIDC_CREATE_USERS', false);
+  const trustEmail = boolFromEnv(env, 'OIDC_TRUST_EMAIL', false);
+  const raw = env.OIDC_ISSUER?.trim();
+  if (!raw) return null;
+  const issuer = parseOidcIssuer(raw, env.NODE_ENV === 'production');
+  const clientIds = (env.OIDC_CLIENT_IDS ?? '').split(',').map((s) => s.trim()).filter(Boolean);
+  if (clientIds.length === 0) throw new Error('OIDC_CLIENT_IDS is required when OIDC_ISSUER is set');
+  return { issuer, clientIds, createUsers, trustEmail };
+}
+
 export function loadAuthConfig(env: NodeJS.ProcessEnv = process.env): AuthConfig {
   const max = intFromEnv(env, 'AUTH_RATE_LIMIT_MAX', 10, 0);
   return {
+    oidc: loadOidcConfig(env),
     registrationOpen: boolFromEnv(env, 'REGISTRATION_OPEN', false),
     registrationDefaultRole: parseRegistrationRole(env.REGISTRATION_DEFAULT_ROLE),
     loginTokenTtlHours: intFromEnv(env, 'LOGIN_TOKEN_TTL_HOURS', 12),

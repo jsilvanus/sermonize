@@ -13,7 +13,7 @@ describe('migrations', () => {
 
   it('applied all migrations and re-running is a no-op', async () => {
     const { rows } = await pool.query('SELECT version FROM schema_migrations ORDER BY version');
-    expect(rows.map((r) => r.version)).toEqual(['0001_init']);
+    expect(rows.map((r) => r.version)).toEqual(['0001_init', '0002_oidc']);
     expect(await migrate(pool)).toEqual([]);
   });
 
