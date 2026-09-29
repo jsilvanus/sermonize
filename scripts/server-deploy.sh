@@ -13,9 +13,11 @@
 #   DEPLOY_BRANCH  main                       branch to deploy
 #   REPO_URL       https://github.com/jsilvanus/sermonize.git
 #   DOMAIN         asked on the first run     public domain (only used when deploy/.env is created)
+#   ADMIN_EMAIL    admin@<domain>             first admin account (first run only)
 #
 # Secrets live in $BASE_DIR/sermonize/deploy/.env (mode 600, gitignored). It is never overwritten; edit
-# it and run this script again to apply changes. First admin: see the hint printed at the end.
+# it and run this script again to apply changes. The first admin gets a generated password, printed once
+# and kept in deploy/.env (SERVER_ADMIN_EMAIL / SERVER_ADMIN_PASSWORD; the stack does not read them).
 set -euo pipefail
 
 NAME=sermonize
@@ -61,7 +63,6 @@ cd "$APP_DIR/deploy"
 log "Deploying $NAME at commit $(git rev-parse --short HEAD)"
 
 # --- 2. Settings and secrets (first run only) ----------------------------------------------------
-FIRST_RUN=
 if [ ! -f "$ENV_FILE" ] && [ -f "$KEPT_ENV" ]; then
   log "Restoring settings kept by server-delete.sh ($KEPT_ENV)"
   mv "$KEPT_ENV" "$ENV_FILE"
@@ -75,8 +76,14 @@ if [ ! -f "$ENV_FILE" ]; then
   sed -i -e "s/^WEB_HOST_PORT=.*/WEB_HOST_PORT=$WEB_PORT/" \
          -e "s/^API_HOST_PORT=.*/API_HOST_PORT=$API_PORT/" \
          -e "s/^MCP_HOST_PORT=.*/MCP_HOST_PORT=$MCP_PORT/" "$ENV_FILE"
+  cat >> "$ENV_FILE" <<EOF
+
+# --- Server deployment (scripts/server-deploy.sh; not read by the stack) --------------------------
+# First admin, created once by the deploy script (SERVER_ADMIN_CREATED=1 afterwards).
+SERVER_ADMIN_EMAIL=${ADMIN_EMAIL:-admin@$DOMAIN}
+SERVER_ADMIN_PASSWORD=$(openssl rand -base64 18 | tr -d '/+=')
+EOF
   chmod 600 "$ENV_FILE"
-  FIRST_RUN=1
   log "Created $ENV_FILE"
 fi
 env_value() { sed -n "s/^$1=//p" "$ENV_FILE" | tail -n 1; }
@@ -89,6 +96,14 @@ docker compose build --pull
 log "Starting stack (database, migrations, api, mcp, web)"
 docker compose up -d --remove-orphans
 
+# First admin, once (bootstrap-admin.sh reads the password from stdin when there is no terminal).
+if [ -n "$(env_value SERVER_ADMIN_EMAIL)" ] && [ "$(env_value SERVER_ADMIN_CREATED)" != 1 ]; then
+  log "Creating the first admin $(env_value SERVER_ADMIN_EMAIL)"
+  printf '%s\n' "$(env_value SERVER_ADMIN_PASSWORD)" | sh scripts/bootstrap-admin.sh "$(env_value SERVER_ADMIN_EMAIL)"
+  echo "SERVER_ADMIN_CREATED=1" >> "$ENV_FILE"
+  log "Admin login: $(env_value SERVER_ADMIN_EMAIL) / $(env_value SERVER_ADMIN_PASSWORD)   (also in $ENV_FILE)"
+fi
+
 # --- 4. Check ------------------------------------------------------------------------------------
 PORT=$(env_value WEB_HOST_PORT)
 for _ in $(seq 1 45); do
@@ -96,10 +111,6 @@ for _ in $(seq 1 45); do
     docker image prune -f >/dev/null
     log "OK: $NAME is up (web 127.0.0.1:$PORT, api :$(env_value API_HOST_PORT), mcp :$(env_value MCP_HOST_PORT));"
     log "    https://$(env_value DOMAIN) once nginx is set up"
-    if [ -n "$FIRST_RUN" ]; then
-      log "First admin (asks for a password):"
-      log "  cd $APP_DIR/deploy && sh scripts/bootstrap-admin.sh you@example.org"
-    fi
     exit 0
   fi
   sleep 2
