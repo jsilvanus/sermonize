@@ -61,6 +61,36 @@ describe('sql/roles.sql (sermonize_app)', () => {
     }
   });
 
+  it('can resolve and link OIDC identities and create OIDC login tokens, but not create privileged users', async () => {
+    await client.query('BEGIN');
+    try {
+      const { rows } = await client.query(
+        `SELECT * FROM private.oidc_resolve_user('https://idp.example/', 'roles-sub', null, 'Roles Test', true, 'reader')`,
+      );
+      expect(rows).toEqual([{ user_id: expect.any(String), role: 'reader', kind: 'human', status: 'active', linked_via: 'created' }]);
+      const token = await client.query(
+        `SELECT * FROM private.create_oidc_login_token('https://idp.example/', 'roles-sub', $1, now() + interval '1 hour', 'mcp')`,
+        ['c'.repeat(64)],
+      );
+      expect(token.rows[0].user_id).toBe(rows[0].user_id);
+      await client.query('SAVEPOINT s');
+      await expectPgError(
+        client.query(`SELECT * FROM private.oidc_resolve_user('https://idp.example/', 'roles-sub-2', null, null, true, 'admin')`),
+        '42501',
+      );
+      await client.query('ROLLBACK TO SAVEPOINT s');
+      // No token for an identity that is not linked.
+      await expectPgError(
+        client.query(`SELECT * FROM private.create_oidc_login_token('https://idp.example/', 'unknown', $1, now() + interval '1 hour', 'mcp')`, [
+          'd'.repeat(64),
+        ]),
+        '42501',
+      );
+    } finally {
+      await client.query('ROLLBACK');
+    }
+  });
+
   it('can resolve tokens through the SECURITY DEFINER function', async () => {
     const { rows } = await client.query('SELECT * FROM private.resolve_token($1)', [hashToken(user.token)]);
     expect(rows).toEqual([{ user_id: user.id, role: 'contributor', kind: 'human' }]);

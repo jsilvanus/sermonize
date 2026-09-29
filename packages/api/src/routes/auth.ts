@@ -11,6 +11,7 @@ import {
   PASSWORD_MIN_LENGTH,
   verifyPassword,
 } from '../lib/passwords.js';
+import { createOidcVerifier } from '../lib/oidc.js';
 import type { Role, UserKind } from '../lib/principal.js';
 import { generateToken, hashToken } from '../lib/tokens.js';
 import { principalOf, requireRole } from '../plugins/auth.js';
@@ -28,22 +29,42 @@ const RegisterBody = Type.Object({
   display_name: Type.Optional(Type.String({ minLength: 1, maxLength: 200 })),
 });
 
+const ClientSchema = Type.Union([Type.Literal('web'), Type.Literal('mcp'), Type.Literal('cli')], {
+  description:
+    "Who asks for the token (default 'web'). The token is named after it and expires after " +
+    'LOGIN_TOKEN_TTL_HOURS (web), MCP_LOGIN_TOKEN_TTL_HOURS (mcp) or CLI_LOGIN_TOKEN_TTL_HOURS (cli, sermonize-admin).',
+});
+
 /** Which client asks for the login token: its name and lifetime depend on it. */
 export type LoginClient = 'web' | 'mcp' | 'cli';
 
 const LoginBody = Type.Object({
   email: Type.String({ minLength: 1, maxLength: 320 }),
   password: Password,
-  client: Type.Optional(
-    Type.Union(
-      [Type.Literal('web'), Type.Literal('mcp'), Type.Literal('cli')],
-      {
-        description:
-          "Who asks for the token (default 'web'). The token is named after it and expires after " +
-          'LOGIN_TOKEN_TTL_HOURS (web), MCP_LOGIN_TOKEN_TTL_HOURS (mcp) or CLI_LOGIN_TOKEN_TTL_HOURS (cli, sermonize-admin).',
-      },
-    ),
+  client: Type.Optional(ClientSchema),
+});
+
+const OidcBody = Type.Object({
+  id_token: Type.String({
+    minLength: 1,
+    maxLength: 16_384,
+    description: 'ID token the client received from the IdP (OIDC_ISSUER) in its authorization-code flow.',
+  }),
+  access_token: Type.Optional(
+    Type.String({
+      minLength: 1,
+      maxLength: 16_384,
+      description: "The IdP access token; used only to read the IdP's userinfo when the ID token carries no email.",
+    }),
   ),
+  client: Type.Optional(ClientSchema),
+});
+
+const LoginResponse = Type.Object({
+  token: Type.String({ description: 'API token; send as `Authorization: Bearer <token>`.' }),
+  expires_at: Type.String({ format: 'date-time' }),
+  user_id: Uuid,
+  role: RoleSchema,
 });
 
 const authErrors = { ...errorResponses, 429: ErrorResponse };
@@ -53,12 +74,18 @@ const authErrors = { ...errorResponses, 429: ErrorResponse };
  *   GET  /auth/config    public: whether registration is open, password rules
  *   POST /auth/register  public, REGISTRATION_OPEN only: creates a human user with REGISTRATION_DEFAULT_ROLE
  *   POST /auth/login     public: email + password (+ client web|mcp|cli) -> expiring API token named after the client
+ *   POST /auth/oidc      public, OIDC_ISSUER only: verified ID token (+ client) -> the same kind of login token
  *   POST /auth/logout    authenticated: revokes the token used for the request
  * PII (email, display name) and the password hash stay in the private schema.
  */
 export const authRoutes: FastifyPluginAsyncTypebox<{ auth: AuthConfig }> = async (app, { auth }) => {
   const rateLimit = auth.rateLimit ? { max: auth.rateLimit.max, timeWindow: auth.rateLimit.timeWindowMs } : undefined;
   const publicLimited = { public: true, ...(rateLimit && { rateLimit }) };
+  const loginTokenExpiry = (client: LoginClient) => {
+    const ttlHours =
+      client === 'mcp' ? auth.mcpLoginTokenTtlHours : client === 'cli' ? auth.cliLoginTokenTtlHours : auth.loginTokenTtlHours;
+    return new Date(Date.now() + ttlHours * 3_600_000);
+  };
 
   app.get(
     '/auth/config',
@@ -123,15 +150,7 @@ export const authRoutes: FastifyPluginAsyncTypebox<{ auth: AuthConfig }> = async
       config: publicLimited,
       schema: {
         body: LoginBody,
-        response: {
-          200: Type.Object({
-            token: Type.String({ description: 'API token; send as `Authorization: Bearer <token>`.' }),
-            expires_at: Type.String({ format: 'date-time' }),
-            user_id: Uuid,
-            role: RoleSchema,
-          }),
-          ...authErrors,
-        },
+        response: { 200: LoginResponse, ...authErrors },
       },
     },
     async (request) => {
@@ -154,9 +173,7 @@ export const authRoutes: FastifyPluginAsyncTypebox<{ auth: AuthConfig }> = async
       if (!ok || cred.status !== 'active') throw invalidCredentials();
 
       const token = generateToken();
-      const ttlHours =
-        client === 'mcp' ? auth.mcpLoginTokenTtlHours : client === 'cli' ? auth.cliLoginTokenTtlHours : auth.loginTokenTtlHours;
-      const expiresAt = new Date(Date.now() + ttlHours * 3_600_000);
+      const expiresAt = loginTokenExpiry(client);
       try {
         await withTransaction(app.pg, null, request.id, (db) =>
           db.query('SELECT private.create_login_token($1, $2, $3, $4)', [cred.user_id, hashToken(token), expiresAt, client]),
@@ -169,6 +186,57 @@ export const authRoutes: FastifyPluginAsyncTypebox<{ auth: AuthConfig }> = async
       return { token, expires_at: expiresAt.toISOString(), user_id: cred.user_id, role: cred.role };
     },
   );
+
+  if (auth.oidc) {
+    const oidc = createOidcVerifier(auth.oidc);
+    app.post(
+      '/auth/oidc',
+      {
+        config: publicLimited,
+        schema: {
+          description:
+            'Sign-in with an ID token from the OIDC provider (only when OIDC_ISSUER is set; otherwise 404). ' +
+            'The API verifies the token itself (JWKS signature, iss, aud in OIDC_CLIENT_IDS, exp, iat at most 10 minutes old), ' +
+            'maps (issuer, subject) to an account (linked identity; else an existing account with the same email when the ' +
+            'email is verified or OIDC_TRUST_EMAIL=true; else a new account when OIDC_CREATE_USERS=true) and issues the same ' +
+            'expiring login token as POST /auth/login. 401 invalid_id_token, 403 no_account, 401 invalid_credentials ' +
+            '(disabled account), 503 oidc_unavailable (IdP unreachable).',
+          body: OidcBody,
+          response: { 200: LoginResponse, ...authErrors, 503: ErrorResponse },
+        },
+      },
+      async (request) => {
+        const client: LoginClient = request.body.client ?? 'web';
+        const identity = await oidc.verify(request.body.id_token, request.body.access_token);
+        const trustedEmail = identity.email && (identity.emailVerified || oidc.config.trustEmail) ? identity.email : null;
+        const displayName = (identity.name ?? identity.email)?.slice(0, 200) ?? null;
+        const token = generateToken();
+        const expiresAt = loginTokenExpiry(client);
+        const result = await withTransaction(app.pg, null, request.id, async (db) => {
+          const { rows } = await db.query<{ user_id: string; role: Role; status: 'active' | 'disabled'; linked_via: string }>(
+            'SELECT * FROM private.oidc_resolve_user($1, $2, $3, $4, $5, $6)',
+            [identity.issuer, identity.subject, trustedEmail, displayName, oidc.config.createUsers, auth.registrationDefaultRole],
+          );
+          const user = rows[0];
+          if (!user) {
+            throw new ApiError(403, 'no_account', 'no Sermonize account for this sign-in; ask the administrator');
+          }
+          // Refused like the password path refuses it; the transaction rolls back, so no link is kept.
+          if (user.status !== 'active') throw invalidCredentials();
+          await db.query('SELECT * FROM private.create_oidc_login_token($1, $2, $3, $4, $5)', [
+            identity.issuer,
+            identity.subject,
+            hashToken(token),
+            expiresAt,
+            client,
+          ]);
+          return user;
+        });
+        request.log.info({ userId: result.user_id, linkedVia: result.linked_via, client }, 'OIDC sign-in');
+        return { token, expires_at: expiresAt.toISOString(), user_id: result.user_id, role: result.role };
+      },
+    );
+  }
 
   app.post(
     '/auth/logout',

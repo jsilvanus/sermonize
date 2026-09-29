@@ -7,7 +7,7 @@
 # `backend` network under unique aliases (sermonize-api), never over the shared networks.
 #
 # Routing on one host name (DOMAIN), highest priority first:
-#   sermonize-mcp        300  /mcp, /oauth/*, the four OAuth/OIDC discovery documents  -> mcp:5999
+#   sermonize-mcp        300  /mcp, /oauth/*, /oidc/*, the four OAuth/OIDC discovery documents -> mcp:5999
 #   sermonize-api-admin  250  /api/admin/*  (strip /api, optional IP allowlist)         -> api:3000
 #   sermonize-api        200  /api, /api/*  (strip /api)                                -> api:3000
 #   sermonize-web          1  everything else (incl. other /.well-known/*: web's 404)  -> web:3100
@@ -91,8 +91,8 @@ services:
       - "traefik.enable=true"
       - "traefik.docker.network=${TRAEFIK_NETWORK:-traefik-public}"
       - "traefik.http.services.sermonize-mcp.loadbalancer.server.port=5999"
-      # Exact paths only: the MCP resource, the OAuth server and its discovery documents (not /health).
-      - "traefik.http.routers.sermonize-mcp.rule=Host(`${DOMAIN}`) && (Path(`/mcp`) || PathPrefix(`/oauth/`) || Path(`/.well-known/oauth-protected-resource`) || Path(`/.well-known/oauth-protected-resource/mcp`) || Path(`/.well-known/oauth-authorization-server`) || Path(`/.well-known/openid-configuration`))"
+      # Exact paths only: the MCP resource, the OAuth server, its OIDC sign-in and its discovery documents (not /health).
+      - "traefik.http.routers.sermonize-mcp.rule=Host(`${DOMAIN}`) && (Path(`/mcp`) || PathPrefix(`/oauth/`) || PathPrefix(`/oidc/`) || Path(`/.well-known/oauth-protected-resource`) || Path(`/.well-known/oauth-protected-resource/mcp`) || Path(`/.well-known/oauth-authorization-server`) || Path(`/.well-known/openid-configuration`))"
       - "traefik.http.routers.sermonize-mcp.priority=300"
       - "traefik.http.routers.sermonize-mcp.entrypoints=${TRAEFIK_ENTRYPOINT:-websecure}"
       - "traefik.http.routers.sermonize-mcp.tls=true"

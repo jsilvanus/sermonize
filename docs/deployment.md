@@ -19,6 +19,7 @@ Both use the same base file and the same routing:
 | `/api/admin/…` | **api**, as above | optional address allowlist |
 | `/mcp` | **mcp** (5999) | MCP resource (Streamable HTTP): no buffering, long timeouts |
 | `/oauth/…` | **mcp** | embedded OAuth authorization server (`/oauth/authorize`, `/oauth/token`) |
+| `/oidc/…` | **mcp** | single sign-on of the MCP sign-in page (`/oidc/login`, `/oidc/callback`); 404 unless `OIDC_ISSUER` is set |
 | `/.well-known/oauth-protected-resource`, `/.well-known/oauth-protected-resource/mcp`, `/.well-known/oauth-authorization-server`, `/.well-known/openid-configuration` | **mcp** | OAuth discovery; any other `/.well-known/…` is 404 |
 
 Not public: the API's and MCP server's `/health` (container health checks only) and PostgreSQL.
@@ -122,6 +123,11 @@ deploy/
 | `LOGIN_TOKEN_TTL_HOURS` / `MCP_LOGIN_TOKEN_TTL_HOURS` / `CLI_LOGIN_TOKEN_TTL_HOURS` | `12` / `720` / `12` | api | login token lifetimes |
 | `AUTH_RATE_LIMIT_MAX` / `AUTH_RATE_LIMIT_WINDOW_SECONDS` | `10` / `60` | api | per client IP, register and login |
 | `MAX_BATCH_ITEMS` | `5000` | api | items per batch request |
+| `OIDC_ISSUER` | empty (off) | api, mcp | single sign-on, see [below](#single-sign-on-oidc) |
+| `OIDC_CLIENT_ID` / `OIDC_CLIENT_SECRET` | empty | mcp (and api's default `OIDC_CLIENT_IDS`) | the IdP client; the secret only for a confidential client |
+| `OIDC_SCOPES` / `OIDC_BUTTON_LABEL` | `openid email profile` / `Sign in with single sign-on` | mcp | |
+| `OIDC_CLIENT_IDS` | `OIDC_CLIENT_ID` | api | client ids accepted in ID tokens (comma-separated) |
+| `OIDC_CREATE_USERS` / `OIDC_TRUST_EMAIL` | `false` / `false` | api | create accounts for new IdP users / link by unverified email |
 | `LOG_LEVEL` | `info` | api, mcp, web | |
 | `MCP_REQUEST_TIMEOUT_MS` / `WEB_REQUEST_TIMEOUT_MS` | `15000` / `10000` | mcp / web | upstream API timeouts |
 | `SERMONIZE_BACKEND_SUBNET` | `172.28.0.0/24` | compose, api `TRUST_PROXY` | change if it collides |
@@ -256,6 +262,42 @@ docker compose run --rm tools sh -c 'sermonize-admin login --email you@example.o
 MCP clients use `https://sermonize.example.org/mcp`; users sign in with their Sermonize account on the
 OAuth page the client opens ([`packages/mcp/README.md`](../packages/mcp/README.md)).
 
+### Single sign-on (OIDC)
+
+Optional. With `OIDC_ISSUER` set, the MCP sign-in page shows a single sign-on button next to the password form
+(web UI and `sermonize-admin` keep password sign-in only). The MCP server is the OIDC Relying Party; the API
+verifies the resulting ID token itself and maps it to a Sermonize account (see the root README, *Accounts and
+sign-in*). Without `OIDC_ISSUER` nothing changes: no button, `/oidc/*` and `POST /api/auth/oidc` do not exist.
+
+**authentik:**
+
+1. *Applications → Providers → Create → OAuth2/OpenID Provider*: client type **Confidential**; redirect URI
+   (strict) `https://sermonize.example.org/oidc/callback`; **Signing key**: a certificate (e.g. the
+   self-signed one authentik ships), so ID tokens are RS256; scopes `openid`, `email`, `profile` (the default
+   mappings).
+2. *Applications → Create*: an application using that provider (slug e.g. `sermonize`); bind policies/groups to
+   decide who may sign in at all.
+3. From the provider page copy the **OpenID Configuration Issuer** (`https://auth.example.org/application/o/sermonize/`,
+   keep the trailing slash), the client id and the client secret into `deploy/.env`:
+
+   ```sh
+   OIDC_ISSUER=https://auth.example.org/application/o/sermonize/
+   OIDC_CLIENT_ID=<client id>
+   OIDC_CLIENT_SECRET=<client secret>
+   OIDC_BUTTON_LABEL=Sign in with single sign-on      # e.g. Kirjaudu kertakirjautumisella
+   ```
+
+4. Accounts: existing accounts are linked on the first SSO sign-in by email when authentik sends
+   `email_verified: true`. If your authentik version or mapping sends `false`, set `OIDC_TRUST_EMAIL=true` only
+   if authentik's email addresses are trustworthy: whoever holds an address there gets the Sermonize account with
+   that address. Once linked, an identity keeps its account even if the email changes later.
+   `OIDC_CREATE_USERS=true` creates an account (`REGISTRATION_DEFAULT_ROLE`, no password) for anyone the
+   authentik application lets through; otherwise they see *"No account for this sign-in; ask the administrator."*
+5. `docker compose up -d` (api and mcp read the variables). Both containers need outbound HTTPS to the IdP:
+   the mcp service is on the `egress` network; the api reaches it through the setup's edge/Traefik network.
+
+The proxy routes `/oidc/` to the MCP server in both setups.
+
 ### Checks after a deployment
 
 ```sh
@@ -369,6 +411,8 @@ the tools profile by itself.
       published ports bypass ufw, which is why nothing else is published); firewall: 22 (restricted), 80, 443.
 - [ ] SSH with keys only; unattended OS security updates; images rebuilt/pulled regularly.
 - [ ] Backups run, are copied off the host, and a restore has been tested.
+- [ ] Single sign-on: only if needed; `OIDC_CREATE_USERS` / `OIDC_TRUST_EMAIL` stay `false` unless the IdP's
+      application policy and email addresses are trusted.
 - [ ] Few admins; tokens for scripts per service user with an expiry (`sermonize-admin tokens create --expires-at …`).
 - [ ] HSTS is sent for two years with `includeSubDomains`; make sure every subdomain can do HTTPS (or drop it:
       `snippets/hsts.conf`, or the `sermonize-hsts`/`sermonize-secheaders` labels).
@@ -447,7 +491,7 @@ Routers (all `Host(DOMAIN)`, explicit priorities):
 
 | router | priority | rule | middlewares | service |
 |---|---|---|---|---|
-| `sermonize-mcp` | 300 | `Path(/mcp)`, `PathPrefix(/oauth/)`, the four discovery paths (exact) | `sermonize-secheaders` | mcp:5999 |
+| `sermonize-mcp` | 300 | `Path(/mcp)`, `PathPrefix(/oauth/)`, `PathPrefix(/oidc/)`, the four discovery paths (exact) | `sermonize-secheaders` | mcp:5999 |
 | `sermonize-api-admin` | 250 | `PathPrefix(/api/admin/)` | `sermonize-admin-allow` (ipAllowList, `ADMIN_ALLOW_CIDRS`), strip, secheaders | api:3000 |
 | `sermonize-api` | 200 | `Path(/api) \|\| PathPrefix(/api/)` | `sermonize-api-slash` (`/api` → `/api/`), `sermonize-api-strip` (stripprefix `/api`), secheaders | api:3000 |
 | `sermonize-web` | 1 | everything else | `sermonize-hsts` | web:3100 |

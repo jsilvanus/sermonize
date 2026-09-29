@@ -7,6 +7,9 @@ export type ErrorCode =
   | 'immutable'
   | 'registration_closed'
   | 'invalid_credentials'
+  | 'invalid_id_token'
+  | 'no_account'
+  | 'oidc_unavailable'
   | 'rate_limited'
   | 'internal_error';
 

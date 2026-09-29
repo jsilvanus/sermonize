@@ -1,7 +1,8 @@
 /**
  * Upstream sessions: the Sermonize API token behind each OAuth grant.
  *
- * Sign-in on the OAuth page calls the API's `POST /auth/login` (client `mcp`); the returned token is
+ * Sign-in on the OAuth page calls the API's `POST /auth/login` (client `mcp`), or `POST /auth/oidc` with
+ * the ID token of a single sign-on (src/oauth/oidc.ts); the returned token is
  * stored encrypted with the grant (src/storage/grants.ts). Tool calls resolve it by the access
  * token's `sid` claim. A grant ends when its refresh token expires (swept periodically, and noticed
  * at refresh time), when it is denied at the consent step or never approved, or when the API rejects
@@ -9,12 +10,12 @@
  * re-authorize; if the token may still be valid, it is also revoked upstream with `POST /auth/logout`
  * (best-effort).
  */
-import { SermonizeApiError, type SermonizeClient } from './connector.js';
+import { SermonizeApiError, type LoginResult, type SermonizeClient } from './connector.js';
 import type { GrantStore } from './storage/interface.js';
 
 export type SignInResult =
   | { ok: true; userId: string; role: string; apiToken: string; expiresAt: number }
-  | { ok: false; reason: 'invalid_credentials' | 'rate_limited' | 'unavailable' };
+  | { ok: false; reason: 'invalid_credentials' | 'no_account' | 'rate_limited' | 'unavailable' };
 
 interface Logger {
   warn(obj: object, msg: string): void;
@@ -30,22 +31,32 @@ export class UpstreamSessions {
   ) {}
 
   /** Verifies the credentials with the API. Never throws for API/transport failures. */
-  async signIn(email: string, password: string, clientIp: string | undefined): Promise<SignInResult> {
+  signIn(email: string, password: string, clientIp: string | undefined): Promise<SignInResult> {
+    return this.obtain('/auth/login', () => this.client.login({ email, password }, clientIp));
+  }
+
+  /** Exchanges a single sign-on's ID token for an API token (`POST /auth/oidc`). Never throws for API/transport failures. */
+  signInWithIdToken(tokens: { idToken: string; accessToken?: string | undefined }, clientIp: string | undefined): Promise<SignInResult> {
+    return this.obtain('/auth/oidc', () => this.client.oidcLogin(tokens, clientIp));
+  }
+
+  private async obtain(route: string, call: () => Promise<LoginResult>): Promise<SignInResult> {
     try {
-      const res = await this.client.login({ email, password }, clientIp);
+      const res = await call();
       const expiresAt = Date.parse(res.expires_at);
       if (typeof res.token !== 'string' || typeof res.user_id !== 'string' || !Number.isFinite(expiresAt)) {
-        this.log.warn({}, 'unexpected POST /auth/login response from the Sermonize API');
+        this.log.warn({ route }, 'unexpected sign-in response from the Sermonize API');
         return { ok: false, reason: 'unavailable' };
       }
       return { ok: true, userId: res.user_id, role: res.role, apiToken: res.token, expiresAt };
     } catch (error) {
       if (error instanceof SermonizeApiError) {
         if (error.status === 429) return { ok: false, reason: 'rate_limited' };
+        if (error.code === 'no_account') return { ok: false, reason: 'no_account' };
         if (error.status === 400 || error.status === 401 || error.status === 403) return { ok: false, reason: 'invalid_credentials' };
-        this.log.warn({ status: error.status, code: error.code }, 'Sermonize API sign-in failed');
+        this.log.warn({ route, status: error.status, code: error.code }, 'Sermonize API sign-in failed');
       } else {
-        this.log.warn({ err: error }, 'Sermonize API sign-in failed');
+        this.log.warn({ route, err: error }, 'Sermonize API sign-in failed');
       }
       return { ok: false, reason: 'unavailable' };
     }

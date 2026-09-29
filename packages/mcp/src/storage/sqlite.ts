@@ -5,14 +5,32 @@ import type { AuthStore, AuthorizationCodeRecord, RefreshTokenRecord } from './i
 
 /**
  * Schema version kept in `PRAGMA user_version`: one encrypted upstream API token per OAuth grant
- * (`grants`); authorization codes and refresh tokens reference their grant. Nothing else lives in this file.
+ * (`grants`); authorization codes and refresh tokens reference their grant. Version 2 adds
+ * `oidc_states`, the short-lived state of OIDC sign-ins in progress (src/oauth/oidc.ts).
+ * Nothing else lives in this file.
  */
-export const SCHEMA_VERSION = 1;
+export const SCHEMA_VERSION = 2;
 
-/** Creates the schema in a new (empty) file; refuses a file with any other schema version. */
+const OIDC_STATES_TABLE =
+  'CREATE TABLE oidc_states (state_sha256 TEXT PRIMARY KEY, code_verifier TEXT NOT NULL, nonce TEXT NOT NULL,' +
+  ' purpose TEXT NOT NULL, oauth TEXT, expires INTEGER NOT NULL);' +
+  'CREATE INDEX oidc_states_expires ON oidc_states (expires);';
+
+/** Creates the schema in a new (empty) file or upgrades version 1; refuses a file with any other schema version. */
 export function initSchema(db: DatabaseSync): void {
   const version = (db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version;
   if (version === SCHEMA_VERSION) return;
+  if (version === 1) {
+    db.exec('BEGIN IMMEDIATE');
+    try {
+      db.exec(OIDC_STATES_TABLE + `PRAGMA user_version = ${SCHEMA_VERSION};`);
+      db.exec('COMMIT');
+    } catch (error) {
+      db.exec('ROLLBACK');
+      throw error;
+    }
+    return;
+  }
   if (version !== 0) {
     throw new Error(`STORAGE_PATH has schema version ${version}; this server expects ${SCHEMA_VERSION}`);
   }
@@ -29,6 +47,7 @@ export function initSchema(db: DatabaseSync): void {
         'CREATE TABLE refresh_tokens (token TEXT PRIMARY KEY, grant_id TEXT NOT NULL REFERENCES grants (id) ON DELETE CASCADE,' +
         ' client_id TEXT NOT NULL, subject TEXT NOT NULL, scope TEXT NOT NULL, expires INTEGER NOT NULL);' +
         'CREATE INDEX refresh_tokens_grant ON refresh_tokens (grant_id);' +
+        OIDC_STATES_TABLE +
         `PRAGMA user_version = ${SCHEMA_VERSION};`,
     );
     db.exec('COMMIT');

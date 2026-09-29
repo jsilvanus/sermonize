@@ -29,6 +29,10 @@ passwords: it passes them to the API's `POST /auth/login` with `client: "mcp"` a
 it gets back, encrypted, for that OAuth grant. The OAuth subject (`sub`) is the Sermonize user id, and
 every tool call runs with the user's own role, restrictions and audit identity.
 
+Optionally the sign-in page also offers **single sign-on** through an OIDC provider such as authentik
+(`OIDC_ISSUER`; see [Single sign-on (OIDC)](#single-sign-on-oidc)). The result is the same: an API token
+of the user's Sermonize account, obtained from the API's `POST /auth/oidc` instead of `POST /auth/login`.
+
 ## Architecture
 
 ```
@@ -123,6 +127,51 @@ MCP client     browser         MCP server             Sermonize API
   grants are swept every 10 minutes, and noticed at refresh time.
 - There is no token revocation endpoint (RFC 7009) and no refresh-token rotation yet, as in the scaffold.
 
+### Single sign-on (OIDC)
+
+With `OIDC_ISSUER` set, the sign-in page shows a button (`OIDC_BUTTON_LABEL`) above the password form.
+This server is then an **OIDC Relying Party** of that provider and stays the OAuth authorization server
+and resource server for MCP clients; it never issues ID tokens, publishes no JWKS and adds nothing to its
+`.well-known` documents. Without `OIDC_ISSUER` there is no button and `/oidc/*` is 404.
+
+```
+browser          MCP server                         IdP (authentik)        Sermonize API
+   |-- GET /oidc/login?oauth=... -->|                     |                     |
+   |                   re-check the OAuth request;        |                     |
+   |                   state, nonce, PKCE verifier ->     |                     |
+   |                   SQLite oidc_states (10 min, keyed  |                     |
+   |                   by SHA-256(state))                 |                     |
+   |<- 302 + cookie sermonize_mcp_oidc=<state> ----------|                     |
+   |   (HttpOnly, SameSite=Lax, Path=/oidc, 10 min)       |                     |
+   |-- /authorize (code, S256 PKCE, state, nonce) ------->|                     |
+   |<- 302 /oidc/callback?code=&state= -------------------|                     |
+   |-- GET /oidc/callback (cookie) ->|                    |                     |
+   |                   cookie state == state? consume     |                     |
+   |                   the row once; code grant --------->|                     |
+   |                   (PKCE, state, nonce checked) <--ID token, access token   |
+   |                   POST /auth/oidc {id_token, client:"mcp"} --------------->|
+   |                                                      |  verify ID token    |
+   |                                                      |  (JWKS, iss, aud,   |
+   |                                                      |  exp, iat), map to  |
+   |                   <-- token, expires_at, user_id, role -- an account -----|
+   |<- consent page (as after a password sign-in) ------|                     |
+```
+
+- The callback is `<MCP_PUBLIC_URL>/oidc/callback`; register exactly that as the redirect URI at the IdP.
+- **Accounts** are mapped by the API (see the root README, *Accounts and sign-in*): an identity already
+  linked to an account; else an existing account with the same email if the email is verified (or the
+  API's `OIDC_TRUST_EMAIL=true`); else a new account if the API's `OIDC_CREATE_USERS=true`; otherwise
+  *"No account for this sign-in; ask the administrator."* Disabled accounts are refused.
+- If the ID token has no email, the IdP access token is passed along and the API reads the IdP's userinfo
+  itself (and requires the same `sub`), so the API never relies on claims it has not verified.
+- Failures (IdP `error=`, state/cookie mismatch, an expired or already used state, a failed code grant, no
+  account) show a plain error page with a way back; they are logged without codes, tokens or claims.
+- `/oidc/login` and `/oidc/callback` are rate-limited per IP (30 per minute) in this server; `POST /auth/oidc`
+  is also rate-limited by the API like `/auth/login`.
+- Discovery of the IdP happens on the first SSO sign-in and is retried after a failure, so the server starts,
+  and password sign-in works, while the IdP is down (the button then answers 503).
+- Password sign-in keeps working next to the button.
+
 ## Setup
 
 Requirements: Node.js >= 22.12 (uses `node:sqlite`), a running Sermonize API, and a Sermonize account
@@ -155,11 +204,21 @@ Environment:
 | `SERMONIZE_TOKEN_KEY` | required | base64 of exactly 32 bytes (AES-256-GCM key) |
 | `SERMONIZE_REQUEST_TIMEOUT_MS` | `15000` | timeout of one upstream request |
 | `LOG_LEVEL` | `info` | |
+| `OIDC_ISSUER` | empty (off) | issuer URL exactly as the IdP publishes it (authentik: `https://auth.example.org/application/o/<slug>/`, keep the trailing slash); https required with `NODE_ENV=production` |
+| `OIDC_CLIENT_ID` | required with `OIDC_ISSUER` | the IdP client id |
+| `OIDC_CLIENT_SECRET` | empty | set for a confidential client (`client_secret_basic`); empty = public client. PKCE is always used |
+| `OIDC_SCOPES` | `openid email profile` | must contain `openid` |
+| `OIDC_BUTTON_LABEL` | `Sign in with single sign-on` | text of the SSO button |
 
 On the **API** side: `MCP_LOGIN_TOKEN_TTL_HOURS` (default 720) sets how long an MCP sign-in lasts, and
 the API's `TRUST_PROXY` must list this server's address, or every MCP sign-in shares one rate-limit bucket.
 
 Users and their roles are managed in the API only; the MCP server has no users of its own.
+
+For single sign-on the **API** needs `OIDC_ISSUER` (the same value) and `OIDC_CLIENT_IDS` (this server's
+`OIDC_CLIENT_ID`), and optionally `OIDC_CREATE_USERS` / `OIDC_TRUST_EMAIL`; it verifies the ID tokens this
+server hands it, so it must be able to reach the IdP too. authentik setup: see
+[`docs/deployment.md`](../../docs/deployment.md#single-sign-on-oidc).
 
 ### Same domain as the web UI
 
@@ -171,6 +230,7 @@ the web UI does not use, so a reverse proxy routes by prefix:
 |---|---|
 | `/mcp` | MCP server |
 | `/oauth/` (`/oauth/authorize`, `/oauth/token`) | MCP server |
+| `/oidc/` (`/oidc/login`, `/oidc/callback`; single sign-on) | MCP server |
 | `/.well-known/oauth-protected-resource`, `/.well-known/oauth-protected-resource/mcp`, `/.well-known/oauth-authorization-server`, `/.well-known/openid-configuration` | MCP server |
 | `/api/` (prefix stripped) | API |
 | everything else | web UI |
@@ -264,7 +324,11 @@ signed-in user, so both the account and the producing model are on record.
   request log has method, URL, host, remote address and status, no headers or bodies.
 - **No PII stored.** The SQLite file holds grant ids, Sermonize user ids, client ids and encrypted tokens;
   the email typed into the sign-in form is only shown back on the consent page.
-- **Rate limiting** is the API's (per client IP). The server forwards `request.ip` as `X-Forwarded-For`; set
+- **Single sign-on.** The state cookie (httpOnly, SameSite=Lax, Path=/oidc, Secure with an https public URL or
+  `NODE_ENV=production`) must match the callback's `state` (login CSRF), and each state row is used once.
+  The code grant checks PKCE, state and nonce; the API then verifies the ID token's signature, issuer,
+  audience, expiry and age itself. ID tokens, codes and IdP access tokens are never stored or logged.
+- **Rate limiting** of password sign-in is the API's (per client IP). The server forwards `request.ip` as `X-Forwarded-For`; set
   `TRUST_PROXY` here for the proxy in front of it, and list this server in the API's `TRUST_PROXY`.
 - The scaffold's remaining production notes still apply (refresh-token rotation, a revocation endpoint,
   CIMD caching); see `LEARNED.md`.
@@ -297,6 +361,13 @@ Tests:
   sign in again, logout of ended grants, the API's per-IP rate limit through the MCP server; then
   `create_person` (audit attribution), `search_persons` with pagination, work/source/text creation,
   `get_text_body` code-point slices, 403/404 mapping.
+
+- `oidc.test.ts`: single sign-on end to end against a fake OIDC provider
+  (`packages/api/test/fake-oidc-provider.ts`, node:http + jose, RS256) and the real API: configuration
+  errors, no button and 404 without `OIDC_ISSUER`, the full flow ending with a token that works on `/mcp`
+  (confidential and public client), cookie attributes and the IdP request (PKCE S256, nonce, state), state/cookie
+  mismatch, replayed and expired states, IdP errors, userinfo when the ID token has no email, unverified email
+  (no account), disabled account, IdP down at the first sign-in (503, then retried), rate limiting.
 
 The tests replace CIMD fetching with a fixed client (`resolveClient` option of `buildMcpApp`), since a
 CIMD document must be served over public HTTPS.

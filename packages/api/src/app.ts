@@ -25,7 +25,8 @@ export interface BuildAppOptions {
   maxBatchItems?: number;
   /**
    * Registration/login settings. Defaults: registration closed, role reader, 12 h web,
-   * 720 h (30 days) MCP and 12 h CLI login tokens, no rate limit (the server passes the env-based config, see config.ts).
+   * 720 h (30 days) MCP and 12 h CLI login tokens, no rate limit, OIDC off (the server passes the env-based
+   * config, see config.ts).
    */
   auth?: Partial<AuthConfig>;
   /** Fastify `trustProxy` (TRUST_PROXY); decides `request.ip` for the auth rate limit. */
@@ -44,6 +45,7 @@ const DEFAULT_AUTH: AuthConfig = {
   mcpLoginTokenTtlHours: 720,
   cliLoginTokenTtlHours: 12,
   rateLimit: null,
+  oidc: null,
 };
 
 export async function buildApp({
@@ -60,6 +62,9 @@ export async function buildApp({
   parseRegistrationRole(authConfig.registrationDefaultRole);
   for (const key of ['loginTokenTtlHours', 'mcpLoginTokenTtlHours', 'cliLoginTokenTtlHours'] as const) {
     if (!Number.isInteger(authConfig[key]) || !(authConfig[key] > 0)) throw new Error(`${key} must be a positive integer`);
+  }
+  if (authConfig.oidc && (!authConfig.oidc.issuer || authConfig.oidc.clientIds.length === 0)) {
+    throw new Error('OIDC needs an issuer and at least one client id (OIDC_ISSUER, OIDC_CLIENT_IDS)');
   }
 
   const app = Fastify({
@@ -89,7 +94,7 @@ export async function buildApp({
   await app.register(authPlugin);
   await app.register(openApiPlugin, { publicBasePath: basePath }); // before the routes it documents
   if (authConfig.rateLimit) {
-    // Only routes with `config.rateLimit` (register/login) are limited; in-memory, per IP.
+    // Only routes with `config.rateLimit` (register/login/oidc) are limited; in-memory, per IP.
     await app.register(rateLimit, {
       global: false,
       errorResponseBuilder: (_request, context) =>
