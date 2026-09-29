@@ -124,6 +124,12 @@ services:
       CLI_LOGIN_TOKEN_TTL_HOURS: ${CLI_LOGIN_TOKEN_TTL_HOURS:-12}
       AUTH_RATE_LIMIT_MAX: ${AUTH_RATE_LIMIT_MAX:-10}
       AUTH_RATE_LIMIT_WINDOW_SECONDS: ${AUTH_RATE_LIMIT_WINDOW_SECONDS:-60}
+      # OIDC single sign-on (off while OIDC_ISSUER is empty). The API verifies the ID tokens the MCP
+      # server obtains, so it needs the issuer, the MCP's client id and outbound HTTPS to the IdP.
+      OIDC_ISSUER: ${OIDC_ISSUER:-}
+      OIDC_CLIENT_IDS: ${OIDC_CLIENT_IDS:-${OIDC_CLIENT_ID:-}}
+      OIDC_CREATE_USERS: ${OIDC_CREATE_USERS:-false}
+      OIDC_TRUST_EMAIL: ${OIDC_TRUST_EMAIL:-false}
     depends_on:
       <<: *db-depends
       migrate:
@@ -150,6 +156,12 @@ services:
       STORAGE_PATH: /data/app.sqlite
       SERMONIZE_API_URL: http://sermonize-api:3000
       SERMONIZE_REQUEST_TIMEOUT_MS: ${MCP_REQUEST_TIMEOUT_MS:-15000}
+      # OIDC single sign-on button on the MCP sign-in page (off while OIDC_ISSUER is empty).
+      OIDC_ISSUER: ${OIDC_ISSUER:-}
+      OIDC_CLIENT_ID: ${OIDC_CLIENT_ID:-}
+      OIDC_CLIENT_SECRET: ${OIDC_CLIENT_SECRET:-}
+      OIDC_SCOPES: ${OIDC_SCOPES:-openid email profile}
+      OIDC_BUTTON_LABEL: ${OIDC_BUTTON_LABEL:-Sign in with single sign-on}
     volumes:
       - mcp_data:/data
     depends_on:
@@ -213,7 +225,7 @@ networks:
     ipam:
       config:
         - subnet: ${SERMONIZE_BACKEND_SUBNET:-172.28.0.0/24}
-  # Outbound HTTPS for mcp (OAuth client metadata documents).
+  # Outbound HTTPS for mcp (OAuth client metadata documents, the OIDC provider).
   egress: {}
 
 volumes:
